@@ -7,12 +7,27 @@
 'use strict';
 import net from 'node:net';
 import path from 'node:path';
+import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { socketPath } from './lib.js';
+import { socketPath, SESSION_DIR } from './lib.js';
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HANDLER = path.join(SCRIPTS_DIR, 'on-terminal-created.js');
+
+// Self-heal guard: single subscriber per session even if the startup flock was
+// bypassed (observed once on 0.9.3 — trigger unknown). Claim via lock dir + pid.
+const LOCK = path.join(SESSION_DIR, 'subscriber.lock.d');
+const PIDFILE = path.join(LOCK, 'pid');
+try { fs.mkdirSync(LOCK); fs.writeFileSync(PIDFILE, String(process.pid)); } catch {
+  try {
+    const other = Number(fs.readFileSync(PIDFILE, 'utf8'));
+    process.kill(other, 0);
+    if (fs.readFileSync(`/proc/${other}/cmdline`, 'utf8').includes('events-subscribe')) process.exit(0);
+  } catch { fs.writeFileSync(PIDFILE, String(process.pid)); }   // stale — take over
+}
+process.on('exit', () => { try { if (fs.readFileSync(PIDFILE, 'utf8').trim() === String(process.pid)) fs.rmSync(LOCK, { recursive: true, force: true }); } catch { /* gone */ } });
+process.on('SIGTERM', () => process.exit(0));
 
 function log(msg) { process.stderr.write(`[devcontainer-spaces] subscriber: ${msg}\n`); }
 

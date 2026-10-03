@@ -2,7 +2,7 @@
 # in-container shells, and surface in-container coding agents as first-class agents.
 id = "devcontainer-spaces"
 name = "Devcontainer Spaces"
-version = "0.4.0"
+version = "0.4.1"
 min_herdr_version = "0.9.0"   # verified against 0.9.3 (layout.apply, pane.report_agent, agent explain --file)
 description = "Detect devcontainers (docker/podman), create spaces with in-container shells, and make agents started inside those containers show up as Herdr agents"
 platforms = ["linux", "macos"]

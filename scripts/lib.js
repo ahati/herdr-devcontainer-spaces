@@ -275,6 +275,33 @@ export function probeAgents(engine, folder, kinds) {
   return present;
 }
 
+// ------------------------------------------------- agent presence markers ---
+// herdr's screen manifests decide the agent STATE, but some agents' idle screens
+// match no manifest rule (observed: pi 2026.10 on herdr 0.9.3 — explain answers
+// `idle` + `default_known_agent_idle_fallback` for ANY screen, which carries no
+// evidence). These content/title markers are the plugin's own presence signal.
+// Extend per agent via settings.env: MARKERS_pi='Antigravity|foo' (a regex).
+const PRESENCE_MARKERS = {
+  pi: [/π - /, /Antigravity-Mode/, /pi-agy-mode/],
+};
+
+export function compileMarkers(cfg) {
+  const out = {};
+  for (const [k, v] of Object.entries(PRESENCE_MARKERS)) out[k] = v.slice();
+  for (const key of Object.keys(cfg)) {
+    const m = key.match(/^MARKERS_([a-z0-9_-]+)$/i);
+    if (m && cfg[key]) {
+      try { out[m[1].toLowerCase()] = [new RegExp(cfg[key])]; } catch (e) { warn(`invalid ${key} regex: ${e.message}`); }
+    }
+  }
+  return out;
+}
+
+export function presenceMatch(kind, text, markers) {
+  const list = markers[kind] || [];
+  return list.some((re) => re.test(text));
+}
+
 // ---------------------------------------------------------------- layout ---
 export function layoutTree(folder, kind) {
   const shell = {

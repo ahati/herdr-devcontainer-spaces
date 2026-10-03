@@ -333,6 +333,19 @@ test('startup: watcher spawn + held-lock skip', { timeout: 60000 }, async () => 
   holder.kill();
 });
 
+test('presence markers: pi detected without manifest match; bare prompt not', { timeout: T.test }, async () => {
+  scenario('presence');
+  const piScreen = '      ▄▀▀▄        Antigravity-Mode\n     ▀▀▀▀▀▀       GLM-5.3-Flash (always)\npi-agy-mode · agy-compatible surface\n';
+  const bare = 'root@container:~$ ';
+  const code = (text, kind) => `unused`;
+  const hit = (t, k) => nodeLib(`console.log(lib.presenceMatch(process.env.K, process.env.T, lib.compileMarkers({})))`, { T: t, K: k }).stdout.trim();
+  assert.equal(hit(piScreen, 'pi'), 'true');
+  assert.equal(hit(bare, 'pi'), 'false');
+  assert.equal(hit('hati@monster: ~/x', 'pi'), 'false');
+  // user-extensible via settings-style keys
+  assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true');
+});
+
 test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () => {
   scenario('watcher-basic');
   engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });

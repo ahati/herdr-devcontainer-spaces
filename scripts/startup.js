@@ -20,15 +20,16 @@ if (detectEngine({ ENGINE: 'auto' })) {
 }
 
 // 2) Watcher daemon (single instance per session; exits with the server).
-// flock WRAPS the process: the lock is held for its lifetime, so repeated
-// startups never duplicate the daemon.
+// flock WRAPS the process and the daemon self-heals duplicates (pid heartbeat
+// inside its lock dir). Output appends to a per-session log for diagnosability.
+const daemonOut = (name) => fs.openSync(path.join(SESSION_DIR, `${name}.log`), 'a');
 spawn('setsid', ['flock', '-n', path.join(SESSION_DIR, 'watcher.lock'),
-  process.execPath, path.join(SCRIPTS_DIR, 'watcher.js')], { stdio: 'ignore', detached: true }).unref();
+  process.execPath, path.join(SCRIPTS_DIR, 'watcher.js')], { stdio: ['ignore', daemonOut('watcher'), daemonOut('watcher')], detached: true }).unref();
 
 // 3) Terminal-conversion subscriber (push-based via socket events.subscribe).
 if (commandExists('node')) {
   spawn('setsid', ['flock', '-n', path.join(SESSION_DIR, 'subscriber.lock'),
-    process.execPath, path.join(SCRIPTS_DIR, 'events-subscribe.js')], { stdio: 'ignore', detached: true }).unref();
+    process.execPath, path.join(SCRIPTS_DIR, 'events-subscribe.js')], { stdio: ['ignore', daemonOut('subscriber'), daemonOut('subscriber')], detached: true }).unref();
 } else {
   log('startup: node not found; terminal auto-conversion disabled');
 }

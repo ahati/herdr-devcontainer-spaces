@@ -5,31 +5,53 @@
 // panes (labeled) are Herdr's — skipped. Single instance per session (lock dir).
 import path from 'node:path';
 import fs from 'node:fs';
-import { log, loadConfig, state, hr, hrJson, SESSION_DIR } from './lib.js';
+import {
+  log, loadConfig, state, hr, hrJson, SESSION_DIR, compileMarkers, presenceMatch,
+} from './lib.js';
 
 const cfg = loadConfig();
+const MARKERS = compileMarkers(cfg);
 
 const LOCK = path.join(SESSION_DIR, 'watcher.lock.d');
 try { fs.mkdirSync(LOCK); } catch { process.exit(0); }   // already running
-process.on('exit', () => { try { fs.rmdirSync(LOCK); } catch { /* gone */ } });
-process.on('SIGTERM', () => process.exit(0));        // run exit handler: release lock
+const PIDFILE = path.join(LOCK, 'pid');
+fs.writeFileSync(PIDFILE, String(process.pid));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+function soleOwner() {                                   // self-heal duplicates
+  try {
+    const other = Number(fs.readFileSync(PIDFILE, 'utf8'));
+    if (other !== process.pid && alive(other)) {
+      const cmd = fs.readFileSync(`/proc/${other}/cmdline`, 'utf8');
+      if (cmd.includes('watcher.js')) return false;       // a peer lives — yield
+    }
+  } catch { /* no pidfile */ }
+  fs.writeFileSync(PIDFILE, String(process.pid));
+  return true;
+}
+process.on('exit', () => { try { if (fs.readFileSync(PIDFILE, 'utf8').trim() === String(process.pid)) fs.rmSync(LOCK, { recursive: true, force: true }); } catch { /* gone */ } });
+process.on('SIGTERM', () => process.exit(0));
 
 log(`watcher started (poll=${cfg.POLL_SECS}s)`);
 
-// classify — explicit state via herdr's own screen manifests; fallback-idle and
-// unknown are not evidence of an agent.
-function classify(snapFile, kind) {
+// classify — herdr's manifests decide the state when they actually match; a
+// fallback-derived idle is NOT evidence (explain falls back on any screen for a
+// known agent kind). Presence markers close the gap for agents whose idle UI
+// matches no manifest rule (pi on herdr 0.9.3): marker hit => agent present,
+// state falls back to idle.
+function classify(snapFile, snapText, title, kind) {
   const r = hrJson(['agent', 'explain', '--file', snapFile, '--agent', kind, '--json']);
-  if (!r.ok || !r.json) return '';
-  const st = r.json.state || '';
-  if (!st || st === 'unknown') return '';
-  if (r.json.idle_fallback_reason || r.json.fallback_reason) return '';
-  return st;
+  if (r.ok && r.json) {
+    const st = r.json.state || '';
+    if (st && st !== 'unknown' && !(r.json.idle_fallback_reason || r.json.fallback_reason)) return st;
+  }
+  if (presenceMatch(kind, `${snapText}\n${title}`, MARKERS)) return 'idle';
+  return '';
 }
 
 function serverAlive() { return hr(['workspace', 'list'], { timeoutMs: 10000 }).ok; }
 
 async function tick() {
+  if (!soleOwner()) { log('duplicate watcher detected; exiting'); process.exit(0); }
   const rows = Object.entries(state.containers()).map(([folder, v]) => ({ ws: v.workspace_id, folder, kinds: v.agents || [] }));
   if (!rows.length) return;
 
@@ -66,10 +88,11 @@ async function tick() {
         continue;
       }
       fs.writeFileSync(snap, rd.stdout);
+      const title = `${p.terminal_title_stripped || ''} ${p.terminal_title || ''} ${p.label || ''}`;
 
       let best = '', bestState = '';
       for (const k of kinds) {
-        const st = classify(snap, k);
+        const st = classify(snap, rd.stdout, title, k);
         if (st) { best = k; bestState = st; break; }
       }
       fs.rmSync(snap, { force: true });
