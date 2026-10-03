@@ -2,20 +2,20 @@
 # in-container shells, and surface in-container coding agents as first-class agents.
 id = "devcontainer-spaces"
 name = "Devcontainer Spaces"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.9.0"   # verified against 0.9.3 (layout.apply, pane.report_agent, agent explain --file)
 description = "Detect devcontainers (docker/podman), create spaces with in-container shells, and make agents started inside those containers show up as Herdr agents"
 platforms = ["linux", "macos"]
 
 # After session restore: rediscover devcontainers, repair spaces, restart the watcher.
 [[startup]]
-command = ["bash", "scripts/startup.sh"]
+command = ["node", "scripts/startup.js"]
 
 [[actions]]
 id = "rescan"
 title = "Devcontainers: rescan and create spaces"
 contexts = ["workspace"]
-command = ["bash", "scripts/discover.sh"]
+command = ["node", "scripts/discover.js"]
 
 # Action invoked with an argument to clear tombstones (bind to a key or run via
 # `herdr plugin action invoke devcontainer-spaces.resurrect`).
@@ -23,19 +23,19 @@ command = ["bash", "scripts/discover.sh"]
 id = "resurrect"
 title = "Devcontainers: rescan (re-create closed spaces)"
 contexts = ["workspace"]
-command = ["bash", "scripts/discover.sh", "--resurrect"]
+command = ["node", "scripts/discover.js", "--resurrect"]
 
 [[actions]]
 id = "shell-here"
 title = "Devcontainers: open in-container shell here"
 contexts = ["workspace"]
-command = ["bash", "scripts/open-shell.sh"]
+command = ["node", "scripts/open-shell.js"]
 
 [[actions]]
 id = "agent-here"
 title = "Devcontainers: start agent in this space"
 contexts = ["workspace"]
-command = ["bash", "scripts/start-agent.sh"]
+command = ["node", "scripts/start-agent.js"]
 
 # Shortcuts — ctrl+alt family is the documented safe space for plugin bindings
 # (herdr's prefix is ctrl+b; most prefix chords are taken by built-ins).
@@ -65,7 +65,7 @@ description = "Devcontainers: start agent in this space"
 
 [[events]]
 on = "workspace.closed"
-command = ["bash", "scripts/on-workspace-closed.sh"]
+command = ["node", "scripts/on-workspace-closed.js"]
 
 # Terminal auto-conversion is event-driven at runtime: the startup hook spawns
 # scripts/events-subscribe.js (node), which holds a socket event subscription and
@@ -78,10 +78,10 @@ command = ["bash", "scripts/on-workspace-closed.sh"]
 id = "dc-shell"
 title = "devcontainer shell"
 placement = "split"
-command = ["bash", "scripts/pane-shell.sh"]
+command = ["node", "scripts/pane-shell.js"]
 
 [[panes]]
 id = "dc-agent"
 title = "devcontainer agent"
 placement = "split"
-command = ["bash", "scripts/pane-agent.sh"]
+command = ["node", "scripts/pane-agent.js"]

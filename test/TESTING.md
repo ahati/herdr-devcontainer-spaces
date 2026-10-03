@@ -19,20 +19,18 @@ devcontainer CLI**. Therefore:
 ## Level 0 — static checks
 
 ```bash
-bash -n scripts/*.sh test/mock/bin/* test/run-tests.sh && echo SYNTAX-OK
-# optional, if shellcheck is installed:
-shellcheck scripts/*.sh || true   # warnings are advisory; failures in SC2xxx logic matter
+node --check scripts/*.js test/run-tests.js && echo SYNTAX-OK
 ```
 
-Expected: `SYNTAX-OK`.
+Expected: `SYNTAX-OK` (Node >= 18 required).
 
 ## Level 1 — mock suite (no containers, no herdr server, safe anywhere)
 
 ```bash
-bash test/run-tests.sh
+timeout 280 node test/run-tests.js
 ```
 
-Expected output ends with **`61 passed, 0 failed`** and exit code 0.
+Expected: **17 tests, 0 failed** (about 15 s; per-test timeouts make hangs impossible — a hang is a failure).
 
 What it covers, via the stubs in `test/mock/bin/` (fake docker, podman, devcontainer,
 herdr, socket-API):
@@ -276,4 +274,5 @@ hermeticity fix, `new_scenario` in `test/run-tests.sh` sanitizes every scenario:
 
 If you add scenarios, inherit this sanitation rather than setting PATH/env by hand;
 use `path_scrub <cmd>` when a scenario needs a binary to be absent. Expected suite
-result on every machine: `61 passed, 0 failed`.
+result on every machine: 17 tests, 0 failed. Hermeticity is now built into the
+Node scenario env (ambient `DOCKER_HOST`/real-docker are scrubbed per scenario).

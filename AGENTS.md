@@ -20,16 +20,24 @@ Guidance for AI agents (and humans) working in this repository.
 
 ```
 herdr-plugin.toml      manifest (id: devcontainer-spaces, min_herdr_version: 0.9.0)
-scripts/lib.sh         engine abstraction (docker|podman), herdr/socket helpers, state
-scripts/discover.sh    rescan + space creation (idempotent, tombstone-aware)
-scripts/watcher.sh     agent-state daemon (one per session, flock-guarded)
-scripts/startup.sh     [[startup]] hook: rescan + (re)spawn watcher
-scripts/*.sh           actions (shell-here, agent-here), event hook, pane entrypoints
-test/run-tests.sh      mock suite (34 checks; runs anywhere bash+jq exist)
+scripts/lib.js         shared core (Node ESM, zero deps): config, session-scoped state,
+                       herdr CLI + socket client, engine abstraction, layouts
+scripts/discover.js    rescan + resurrect (idempotent, tombstone-aware, race-locked)
+scripts/watcher.js     agent-state poll daemon (one per session, lock-guarded)
+scripts/events-subscribe.js  socket event pump (tab/pane conversion, push-based)
+scripts/on-terminal-created.js  conversion policy (invoked per push event)
+scripts/startup.js     [[startup]] hook: rescan + spawn watcher/subscriber
+scripts/*.js           actions (shell-here, agent-here), event hook, pane entrypoints
+test/run-tests.js      node:test suite (17 tests; runs anywhere node ≥18 exists)
 test/mock/bin/         stub docker/podman/devcontainer/herdr/api — heredoc-driven
-test/TESTING.md        full test instructions — READ BEFORE RUNNING TESTS
+test/TESTING.md        full test instructions — READ BEFORE RUNNING LIVE TESTS
 docs/01..04-*.md       research + design background
 ```
+
+All plugin code is Node ESM (no npm dependencies, no build step). The only
+external requirements: `node` ≥ 18, `jq` (parity guard), and for pane entrypoints
+the `devcontainer` CLI. Locks use `flock` (watcher/subscriber spawn guards) and
+an mkdir-based lock for state mutations.
 
 ## Environment notes
 
@@ -64,8 +72,13 @@ docs/01..04-*.md       research + design background
 ## Testing
 
 ```bash
-bash -n scripts/*.sh && bash test/run-tests.sh   # expect: 61 passed, 0 failed
+bash -n scripts/../test/mock/bin/* 2>/dev/null; node --check scripts/*.js test/run-tests.js && \
+  timeout 280 node test/run-tests.js   # expect: 17 tests, 0 failed (~15s)
 ```
+
+The suite is Node (`node:test`) with per-test timeouts and a self-watchdog — it
+never hangs, it fails. Mock fixtures in `test/mock/bin/` remain tiny bash stubs
+(test-only code). Requires `node` ≥ 18 (already required at runtime).
 
 For live tests (herdr smoke, docker/podman end-to-end, engine matrix, lifecycle),
 **follow [test/TESTING.md](test/TESTING.md) exactly** — it defines levels, named

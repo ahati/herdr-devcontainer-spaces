@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+// discover.js — enumerate devcontainers and create/repair spaces (rescan action).
+import path from 'node:path';
+import fs from 'node:fs';
+import {
+  log, warn, die, loadConfig, detectEngine, describeEngine, dcList, dc, probeAgents,
+  layoutTree, layoutApply, state, tombstone, hr, hrJson, commandExists, SESSION_DIR,
+} from './lib.js';
+
+const RESURRECT = process.argv.includes('--resurrect');
+const cfg = loadConfig();
+const engine = detectEngine(cfg);
+if (!engine) {
+  die(`no working container engine found (tried docker, podman). Install one, or pin ENGINE=docker|podman in settings.env`);
+}
+
+// Serialize concurrent rescans (startup hook x user action race creates dupes).
+const rescanLock = path.join(SESSION_DIR, 'rescan.lock.d');
+fs.mkdirSync(SESSION_DIR, { recursive: true });
+try { fs.mkdirSync(rescanLock); } catch {
+  const deadline = Date.now() + 60000;
+  for (;;) {
+    try { fs.mkdirSync(rescanLock); break; } catch {
+      if (Date.now() > deadline) die('another rescan is holding the lock');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+}
+process.on('exit', () => { try { fs.rmdirSync(rescanLock); } catch { /* gone */ } });
+
+log(`engine: ${describeEngine(engine)}; user-scope filter: ${
+  engine.rootless ? 'engine is user-scoped (rootless); $HOME check is a sanity pass' : '$HOME path heuristic (shared engine)'}`);
+if (!commandExists('devcontainer')) warn('devcontainer CLI not found — spaces will be created, but shells cannot exec until it is installed');
+
+const home = path.resolve(process.env.HOME || '~');
+let created = 0;
+for (const row of dcList(engine.engine)) {
+  const folder = row.folder;
+  if (!folder) continue;
+  if (!path.resolve(folder).startsWith(home + path.sep)) {
+    log(`skip ${folder} (outside $HOME on a shared engine)`);
+    continue;
+  }
+  if (tombstone.has(folder) && !RESURRECT) { log(`skip ${folder} (tombstoned; use resurrect to re-create)`); continue; }
+  if (RESURRECT && tombstone.has(folder)) { tombstone.clear(folder); log(`resurrecting ${folder} (tombstone cleared)`); }
+
+  if (row.state !== 'running') {
+    if (cfg.AUTO_START_CONTAINERS !== 1) {
+      log(`skip ${folder} (container ${row.state}; enable AUTO_START_CONTAINERS=1 in settings.env or start it manually)`);
+      continue;
+    }
+    log(`starting container for ${folder} (AUTO_START_CONTAINERS=1)`);
+    dc(engine.engine, ['up', '--workspace-folder', folder], { timeoutMs: 300000, stdio: 'ignore' });
+  }
+
+  const existing = state.containers()[folder];
+  if (existing && hr(['workspace', 'get', existing.workspace_id]).ok) {
+    log(`tracked: ${folder} -> ${existing.workspace_id}`);
+    continue;
+  }
+
+  const kinds = commandExists('devcontainer') ? probeAgents(engine.engine, folder, cfg.AGENTS) : [];
+  log(`agents present in ${folder}:${kinds.length ? ' ' + kinds.join(' ') : ' none'}`);
+  const kind = cfg.AUTO_START_AGENTS === 1 && kinds.length ? kinds[0] : '';
+
+  const made = hrJson(['workspace', 'create', '--cwd', folder, '--label', path.basename(folder), '--no-focus']);
+  const ws = made.json?.result?.workspace?.workspace_id;
+  if (!made.ok || !ws) { warn(`workspace create failed for ${folder}`); continue; }
+  log(`created workspace ${ws} (${path.basename(folder)})`);
+
+  if (await layoutApply({ workspaceId: ws, tabLabel: cfg.TAB_LABEL, root: layoutTree(folder, kind) })) {
+    log(`applied devcontainer tab layout (${ws})`);
+  } else {
+    warn('layout.apply unavailable; keeping default root pane — use the shell-here action');
+  }
+  await state.upsert(folder, ws, row.id, kinds);
+  created++;
+}
+log(`rescan done (created: ${created})`);
