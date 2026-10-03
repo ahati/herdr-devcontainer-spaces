@@ -177,8 +177,9 @@ test('discover: tombstone + resurrect', { timeout: T.test }, () => {
   scenario('discover-tomb');
   engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
   const tb = (f) => nodeLib(`console.log(lib.tombstonePath(process.env.TF))`, { TF: f }).stdout.trim();
-  fs.mkdirSync(SC.stateDir, { recursive: true });
-  fs.writeFileSync(tb(`${SC.d}/home/project-a`), 'x');
+  const tbp = tb(`${SC.d}/home/project-a`);          // resolve once: two
+  fs.mkdirSync(path.dirname(tbp), { recursive: true }); // subprocess lookups can
+  fs.writeFileSync(tbp, 'x');                           // diverge under load
   assert.ok(run('discover.js').stderr.includes('tombstoned'));
   assert.ok(run('discover.js', ['--resurrect']).stderr.includes('resurrecting'));
 });

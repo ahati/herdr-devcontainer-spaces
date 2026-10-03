@@ -57,6 +57,7 @@ export function loadConfig() {
   const file = path.join(CONFIG_DIR, 'settings.env');
   try { Object.assign(cfg, parseSettings(fs.readFileSync(file, 'utf8'))); } catch { /* absent */ }
   // settings.env values are strings — coerce the numeric knobs
+  if (cfg.TOMBSTONE_SESSION_ONLY === 0) setTombstoneScope(false);
   for (const k of ['AUTO_CREATE_SPACES', 'AUTO_START_CONTAINERS', 'AUTO_START_AGENTS', 'POLL_SECS']) {
     if (cfg[k] !== undefined && cfg[k] !== '') cfg[k] = Number(cfg[k]) || 0;
   }
@@ -133,9 +134,16 @@ export const state = {
   },
 };
 
+// Tombstones are SESSION-scoped by default: closing a space hides it for the
+// rest of this herdr session (rescans respect it); the next session start —
+// or a container restart (engine-event hook) — brings the space back. The old
+// forever-tombstone behavior is opt-in via TOMBSTONE_SESSION_ONLY=0.
+let tombstonesSessionScoped = true;
+export function setTombstoneScope(sessionScoped) { tombstonesSessionScoped = sessionScoped; }
 export function tombstonePath(folder) {
   const h = crypto.createHash('md5').update(folder).digest('hex');
-  return path.join(STATE_ROOT, `${h}.closed`);
+  const base = tombstonesSessionScoped ? SESSION_DIR : STATE_ROOT;
+  return path.join(base, `${h}.closed`);
 }
 export const tombstone = {
   has: (folder) => fs.existsSync(tombstonePath(folder)),
