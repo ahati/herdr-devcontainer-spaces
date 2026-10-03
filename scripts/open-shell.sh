@@ -11,9 +11,7 @@ load_config
 state_init
 require_cmds jq
 
-HERDR="${HERDR_BIN_PATH:-herdr}"
-
-ws=$(printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -r '.workspace_id // empty' 2>/dev/null)
+ws=$(current_workspace_id)
 [ -n "$ws" ] || { log "no workspace context; open a devcontainer space first"; exit 1; }
 
 folder=$(jq -r --arg ws "$ws" 'to_entries[] | select(.value.workspace_id==$ws) | .key' "$STATE_FILE" 2>/dev/null | head -1)
@@ -24,7 +22,6 @@ if [ -z "$folder" ]; then
 fi
 
 log "opening devcontainer shell for $folder in $ws"
-"$HERDR" plugin pane open \
-  --plugin "$PLUGIN_ID" --entrypoint dc-shell \
-  --workspace "$ws" --placement split --no-focus \
-  --env "DEVCONTAINER_FOLDER=$folder"
+out=$(pane_open_fallback "$ws" dc-shell "DEVCONTAINER_FOLDER=$folder") \
+  || die "plugin pane open failed: $out"
+log "opened devcontainer shell pane ($out) in $ws"

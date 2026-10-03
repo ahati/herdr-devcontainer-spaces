@@ -12,9 +12,7 @@ load_config
 state_init
 require_cmds jq
 
-HERDR="${HERDR_BIN_PATH:-herdr}"
-
-ws=$(printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -r '.workspace_id // empty' 2>/dev/null)
+ws=$(current_workspace_id)
 [ -n "$ws" ] || { log "no workspace context; open a devcontainer space first"; exit 1; }
 
 folder=$(jq -r --arg ws "$ws" 'to_entries[] | select(.value.workspace_id==$ws) | .key' "$STATE_FILE" 2>/dev/null | head -1)
@@ -30,9 +28,7 @@ fi
 
 kind="$kinds"
 log "opening $kind pane for $folder in $ws"
-"$HERDR" plugin pane open \
-  --plugin "$PLUGIN_ID" --entrypoint dc-agent \
-  --workspace "$ws" --placement split --no-focus \
-  --env "DEVCONTAINER_FOLDER=$folder" \
-  --env "DC_AGENT_KIND=$kind" \
-  --env "HERDR_AGENT=$kind"
+out=$(pane_open_fallback "$ws" dc-agent \
+  "DEVCONTAINER_FOLDER=$folder" "DC_AGENT_KIND=$kind" "HERDR_AGENT=$kind") \
+  || die "plugin pane open failed: $out"
+log "opened $kind pane ($out) in $ws"

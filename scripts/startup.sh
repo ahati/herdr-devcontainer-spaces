@@ -19,8 +19,9 @@ else
 fi
 
 # 2) Watcher daemon (single instance per session; exits with the server).
-LOCK="$STATE_DIR/watcher.lock"
-if ! flock -n "$LOCK" true 2>/dev/null; then
+# flock -n probe: exit 0 ⇔ lock was free ⇔ no watcher running → spawn one.
+LOCK="$SESSION_DIR/watcher.lock"
+if flock -n "$LOCK" true 2>/dev/null; then
   setsid bash "$SCRIPT_DIR/watcher.sh" </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true
 fi

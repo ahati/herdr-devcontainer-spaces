@@ -29,7 +29,7 @@ load_config
 state_init
 require_cmds jq
 
-LOCK="$STATE_DIR/watcher.lock"
+LOCK="$SESSION_DIR/watcher.lock"          # per-session: one watcher per herdr session
 exec 9>"$LOCK"
 flock -n 9 || exit 0                        # already running for this session
 
@@ -72,9 +72,14 @@ while true; do
   mapfile -t ROWS < <(jq -r 'to_entries[] | "\(.value.workspace_id)\t\(.key)\t\(.value.agents // [] | join(" "))"' "$STATE_FILE" 2>/dev/null)
   [ ${#ROWS[@]} -eq 0 ] && continue
 
-  if ! listing=$(hr pane list --json 2>/dev/null); then
-    log "herdr unreachable; watcher exiting (startup hook will restart it)"
-    exit 0
+  # herdr 0.9.3: `pane list` prints JSON by default (no --json flag). A failed
+  # command is not a dead server — probe liveness once before giving up.
+  if ! listing=$(hr pane list 2>/dev/null); then
+    if ! hr api schema >/dev/null 2>&1; then
+      log "herdr unreachable; watcher exiting (startup hook will restart it)"
+      exit 0
+    fi
+    continue                                # transient command failure; retry next poll
   fi
 
   for row in "${ROWS[@]}"; do

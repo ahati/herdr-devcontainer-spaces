@@ -13,6 +13,12 @@ compact=$(printf '%s' "$params" | jq -c . 2>/dev/null) || { echo "invalid params
 
 printf '%s %s\n' "$method" "$compact" >> "$CALLS"
 if [ "$method" = "layout.apply" ]; then
+  # herdr 0.9.3 contract (LayoutApplyParams): exactly one of tab_id / workspace_id.
+  if printf '%s' "$compact" | jq -e \
+      '(.tab_id != null) == (.workspace_id != null)' >/dev/null 2>&1; then
+    printf '%s\n' '{"error":{"code":"invalid_params","message":"use either tab_id or workspace_id, not both"}}'
+    exit 2
+  fi
   printf 'LAYOUT %s\n' "$compact" >> "$CALLS"
 fi
 exit 0

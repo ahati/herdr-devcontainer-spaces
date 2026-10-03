@@ -23,6 +23,12 @@ state_init
 if ! engine_detect; then
   die "no working container engine found (tried docker, podman). Install docker or podman, or pin [settings.env] ENGINE=docker|podman in $CONFIG_DIR"
 fi
+
+# Serialize concurrent rescans: the [[startup]] hook and a user-invoked rescan can
+# overlap; without this, both see "no mapping" and create duplicate spaces.
+exec 8>"$SESSION_DIR/rescan.lock"
+flock -w 60 8 || die "another rescan is holding the lock"
+
 log "engine: $(engine_describe); user-scope filter: $(
   [ "$ROOTLESS" = 1 ] && echo 'engine is user-scoped (rootless); \$HOME check is a sanity pass' || echo '\$HOME path heuristic (shared engine)'
 )"

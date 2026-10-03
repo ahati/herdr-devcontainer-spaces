@@ -33,10 +33,11 @@ docs/01..04-*.md       research + design background
 
 ## Environment notes
 
-- The authoring dev container has **herdr 0.9.3, jq, node, bash, gh — but no
-  docker/podman/devcontainer CLI**. Container-level validation must happen elsewhere;
-  follow [test/TESTING.md](test/TESTING.md) levels 0–2 locally, level 3 on an engine
-  host.
+- The authoring dev container has **herdr 0.9.3, jq, node, bash, gh, a working
+  rootless docker** (client+server 29.8.1, via `DOCKER_HOST=unix:///run/user/1000/docker.sock`),
+  and the **devcontainer CLI 0.89.0** (npm/nvm path) — but still **no podman**. Levels
+  0–2 and the docker half of level 3 can now run in-container; the podman matrix still
+  needs another machine. Follow [test/TESTING.md](test/TESTING.md).
 - `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH` may be set ambiently; scripts honor them by
   design. Tests pin `HERDR_BIN_PATH` to the mock — keep it that way, or you will create
   real workspaces in a live herdr session.
@@ -63,7 +64,7 @@ docs/01..04-*.md       research + design background
 ## Testing
 
 ```bash
-bash -n scripts/*.sh && bash test/run-tests.sh   # expect: 34 passed, 0 failed
+bash -n scripts/*.sh && bash test/run-tests.sh   # expect: 53 passed, 0 failed
 ```
 
 For live tests (herdr smoke, docker/podman end-to-end, engine matrix, lifecycle),

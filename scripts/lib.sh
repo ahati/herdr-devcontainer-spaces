@@ -131,11 +131,13 @@ PYEOF
   warn "need node or python3 for raw socket API (layout.apply)"; return 1
 }
 
-# layout_apply <workspace_id> <tab_id> <label> <root-tree-json>
+# layout_apply <workspace_id> <label> <root-tree-json> — replace the default root tab
+# with a declarative tree. api schema: LayoutApplyParams takes tab_id XOR workspace_id;
+# we pass workspace_id only (fresh tab in the workspace we just created).
 layout_apply() {
-  local ws="$1" tab="$2" label="$3" tree="$4" payload resp
-  payload=$(jq -n --arg ws "$ws" --arg tab "$tab" --arg l "$label" --argjson root "$tree" \
-    '{workspace_id:$ws, tab_id:$tab, tab_label:$l, focus:false, root:$root}')
+  local ws="$1" label="$2" tree="$3" payload resp
+  payload=$(jq -n --arg ws "$ws" --arg l "$label" --argjson root "$tree" \
+    '{workspace_id:$ws, tab_label:$l, focus:false, root:$root}')
   if ! resp=$(api_request layout.apply "$payload"); then
     [ -n "$resp" ] && log "layout.apply: $(printf '%s' "$resp" | jq -r '.error.message // "failed"' 2>/dev/null)"
     return 1
@@ -144,19 +146,25 @@ layout_apply() {
 }
 
 # ------------------------------------------------------------------- state ---
-STATE_FILE="$STATE_DIR/containers.json"   # folder -> {workspace_id,container_id,state,agents[]}
-PANES_FILE="$STATE_DIR/panes.json"        # pane_id -> {agent,state,seq}
-STATE_LOCK="$STATE_DIR/.lock"
+# Session-scoped state: workspace ids (w1..) collide across herdr sessions and the
+# watcher is one-per-session, so per-session files live under sessions/<name>/.
+# Tombstones and the engine shim stay at the top level (cross-session user intent /
+# engine-level). HERDR_SESSION is provided to plugin children by herdr 0.9.3.
+SESSION_NAME="${HERDR_SESSION:-default}"
+SESSION_DIR="$STATE_DIR/sessions/$SESSION_NAME"
+STATE_FILE="$SESSION_DIR/containers.json"   # folder -> {workspace_id,container_id,state,agents[]}
+PANES_FILE="$SESSION_DIR/panes.json"        # pane_id -> {agent,state,seq}
+STATE_LOCK="$SESSION_DIR/.lock"
 
 state_init() {
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$SESSION_DIR"
   [ -f "$STATE_FILE" ] || printf '{}' > "$STATE_FILE"
   [ -f "$PANES_FILE" ] || printf '{}' > "$PANES_FILE"
 }
 
 # state_with_lock <cmd...> — serialize mutations across watcher + actions.
 state_with_lock() {
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$SESSION_DIR"
   ( flock -x 9; "$@" ) 9>>"$STATE_LOCK"
 }
 
@@ -276,6 +284,40 @@ dc_exec() {  # <workspace-folder> <cmd...>
   dc exec --workspace-folder "$folder" "$@"
 }
 
+# current_workspace_id — workspace id from the plugin context (TUI palette) or,
+# failing that, from the HERDR_PANE_ID prefix (<ws>:<n>) that herdr 0.9.3 exports
+# to plugin children even for CLI invocations. Prints empty when unavailable.
+current_workspace_id() {
+  local ws
+  ws=$(printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -r '.workspace_id // empty' 2>/dev/null)
+  if [ -z "$ws" ] && [ -n "${HERDR_PANE_ID:-}" ]; then ws="${HERDR_PANE_ID%%:*}"; fi
+  printf '%s' "$ws"
+}
+
+# pane_open_fallback <workspace_id> <entrypoint> <env-assignments...>
+# herdr 0.9.3: split/zoomed plugin panes require an existing target pane; some
+# builds also fail to forward --target-pane. Try split (targeting the workspace's
+# first pane), then fall back to a plain tab. Prints "split" or "tab" on success;
+# on failure prints the CLI output and returns 1.
+pane_open_fallback() {
+  local ws="$1" entry="$2"; shift 2
+  local -a envs=() a target out
+  for a in "$@"; do envs+=(--env "$a"); done
+  if target=$(hr pane list 2>/dev/null | jq -r --arg ws "$ws" \
+      '(.result.panes // .result // [])[]? | select(.workspace_id == $ws) | .pane_id' 2>/dev/null | head -1) \
+     && [ -n "$target" ]; then
+    out=$(hr plugin pane open --plugin "$PLUGIN_ID" --entrypoint "$entry" \
+      --workspace "$ws" --placement split --target-pane "$target" --direction right --no-focus \
+      "${envs[@]}" 2>&1) || true
+    case "$out" in *plugin_pane_opened*) printf 'split'; return 0;; esac
+  fi
+  out=$(hr plugin pane open --plugin "$PLUGIN_ID" --entrypoint "$entry" \
+    --workspace "$ws" --placement tab --no-focus "${envs[@]}" 2>&1) || true
+  case "$out" in *plugin_pane_opened*) printf 'tab'; return 0;; esac
+  printf '%s' "$out"
+  return 1
+}
+
 # dc_probe_agents <folder> <kinds...> — echo the subset of kinds with binaries present.
 dc_probe_agents() {
   local folder="$1"; shift
@@ -325,19 +367,19 @@ layout_tree() {
 # no suffix), per product decision.
 space_create() {
   local folder="$1" kind="$2"
-  local label created ws tab tab_id
+  local label created ws tab_id
   label=$(basename "$folder")
 
   created=$(hr workspace create --cwd "$folder" --label "$label" --no-focus) || {
     warn "workspace create failed for $folder"; return 1; }
   ws=$(printf '%s' "$created" | jq -r '.result.workspace.workspace_id')
-  tab_id=$(printf '%s' "$created" | jq -r '.result.tab.tab_id')
+  tab_id=$(printf '%s' "$created" | jq -r '.result.tab.tab_id // empty')
   [ -n "$ws" ] && [ "$ws" != null ] || { warn "no workspace id in create response"; return 1; }
   log "created workspace $ws ($label)"
 
   # Replace the default root tab with the devcontainer tab (shell + optional agent).
   if tree=$(layout_tree "$folder" "$kind"); then
-    if layout_apply "$ws" "$tab_id" "$TAB_LABEL" "$tree"; then
+    if layout_apply "$ws" "$TAB_LABEL" "$tree"; then
       log "applied devcontainer tab layout ($ws)"
     else
       warn "layout.apply unavailable; keeping default root pane — use the 'shell-here' action"

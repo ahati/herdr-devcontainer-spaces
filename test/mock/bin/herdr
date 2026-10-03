@@ -42,6 +42,8 @@ case "$cmd" in
     sub="${1:-}"; shift || true
     case "$sub" in
       list)
+        # herdr 0.9.3: `pane list` prints JSON by default; --json is not an option.
+        case "${1:-}" in --json) echo "unknown option: --json" >&2; exit 2 ;; esac
         [ -f "${MOCK_PANES:-/nonexistent}" ] && cat "$MOCK_PANES" || printf '{"result":{"panes":[]}}\n' ;;
       read)
         pane=""; i=0
@@ -82,8 +84,36 @@ case "$cmd" in
       *) note "agent.$sub $*"; exit 0 ;;
     esac ;;
   plugin)
-    note "plugin $*"
-    exit 0 ;;
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      pane)
+        psub="${1:-}"; shift || true
+        if [ "$psub" != "open" ]; then note "plugin.pane.$psub $*"; exit 0; fi
+        # herdr 0.9.3: split/zoomed plugin panes require --target-pane.
+        entry=""; ws=""; placement=""; target=""; env=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --entrypoint) entry="$2"; shift 2 ;;
+            --workspace)  ws="$2"; shift 2 ;;
+            --placement)  placement="$2"; shift 2 ;;
+            --target-pane) target="$2"; shift 2 ;;
+            --env)        env="$env $2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        note "pane.open entry=$entry ws=$ws placement=$placement target=${target:-none} env=$env"
+        if [ "$placement" = split ] || [ "$placement" = zoomed ]; then
+          if [ -z "$target" ] || [ "${MOCK_PANE_OPEN_MODE:-}" = fail-split ]; then
+            printf '%s\n' '{"error":{"code":"invalid_params","message":"split and zoomed plugin panes target an existing pane; use target_pane_id"}}'
+            exit 1
+          fi
+        fi
+        n=$(( $(grep -c pane_id "${MOCK_PANES:-/dev/null}" 2>/dev/null || echo 1) + 1 ))
+        pane="$ws:p$n"
+        jq -n --arg ws "$ws" --arg pane "$pane" --arg entry "$entry" \
+          '{plugin_pane:{entrypoint:$entry,pane:{pane_id:$pane,workspace_id:$ws,label:"plugin"}},type:"plugin_pane_opened"}' ;;
+      *) note "plugin.$sub $*"; exit 0 ;;
+    esac ;;
   ping|status)
     exit 0 ;;
   *)

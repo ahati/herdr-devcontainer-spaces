@@ -13,6 +13,22 @@ ok()   { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 fail_(){ fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else fail_ "$1 — [$2]"; fi }
 
+# path_scrub <cmd> — print a shadow dir (symlinks to everything on BASE_PATH except
+# <cmd>) so `command -v <cmd>` fails even if the ambient machine has the real binary.
+path_scrub() {
+  local cmd=$1 dir; dir=$(mktemp -d "$MOCK/scrub.XXXXXX")
+  local IFS=: d f b
+  for d in $BASE_PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      [ -e "$f" ] || continue
+      b=$(basename "$f"); [ "$b" = "$cmd" ] && continue
+      [ -e "$dir/$b" ] || ln -s "$f" "$dir/$b" 2>/dev/null
+    done
+  done
+  printf '%s' "$dir"
+}
+
 new_scenario() {  # $1 = name; sets up a fresh mock env; echoes the mock dir
   local name="$1"
   local d; d="$(mktemp -d "/tmp/dcsp-$name.XXXXXX")"
@@ -20,6 +36,8 @@ new_scenario() {  # $1 = name; sets up a fresh mock env; echoes the mock dir
   cp "$HERE"/mock/bin/* "$d/stubs/"; chmod +x "$d/stubs"/*
   export PATH="$d/stubs:$BASE_PATH"        # no accumulation across scenarios
   export HERDR_BIN_PATH="$d/stubs/herdr"   # pin the mock herdr (ambient env may set it!)
+  unset DOCKER_HOST DOCKER_CONTEXT CONTAINER_HOST  # engine env must not leak in
+  export XDG_RUNTIME_DIR="$d/xdg"; mkdir -p "$d/xdg"  # hide real engine sockets
   export MOCK="$d"
   export HERDR_PLUGIN_STATE_DIR="$d/state"
   export HERDR_PLUGIN_CONFIG_DIR="$d/config"; mkdir -p "$d/config"
@@ -27,6 +45,7 @@ new_scenario() {  # $1 = name; sets up a fresh mock env; echoes the mock dir
   export MOCK_ENGINES="$d/engines.json"
   export MOCK_PANES="$d/panes.json"
   export MOCK_CALLS="$d/calls.log"; : > "$MOCK_CALLS"
+  export HERDR_SESSION=mock-1                  # plugin state is session-scoped
   SCENARIO_DIR="$d"
 }
 
@@ -97,11 +116,13 @@ check "discover exits 0"                 "[ $rc -eq 0 ] || tail -5 '$d/discover.
 check "workspace created (mock call)"    'grep -q "workspace.create" "$MOCK_CALLS"'
 check "space label is directory name only" 'grep -q "workspace.create .*label=project-a " "$MOCK_CALLS"'
 check "layout.apply sent"                'grep -q "layout.apply" "$MOCK_CALLS"'
-ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/containers.json")
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/sessions/mock-1/containers.json")
 check "mapping saved"                    '[ -n "$ws" ]'
-check "agents probed claude+codex"       'jq -e --arg f "'"$d"'/home/project-a" ".[\$f].agents == [\"claude\",\"codex\"]" "'"$HERDR_PLUGIN_STATE_DIR"'/containers.json" >/dev/null'
+check "agents probed claude+codex"       'jq -e --arg f "'"$d"'/home/project-a" ".[\$f].agents == [\"claude\",\"codex\"]" "'"$HERDR_PLUGIN_STATE_DIR"'/sessions/mock-1/containers.json" >/dev/null'
 tree=$(grep "^LAYOUT " "$MOCK_CALLS" | tail -1 | cut -d" " -f2-)
 check "layout tree valid JSON"           'printf "%s" "$tree" | jq -e ".root.type == \"split\"" >/dev/null'
+check "layout payload: workspace_id only, no tab_id (0.9.3 contract)" \
+  'l=$(grep "^LAYOUT " "$MOCK_CALLS" | tail -1); printf "%s" "$l" | grep -q "\"workspace_id\":" && ! printf "%s" "$l" | grep -q "\"tab_id\":"'
 check "tree: shell pane uses devcontainer exec" 'printf "%s" "$tree" | jq -e ".root.first.command[0] == \"devcontainer\"" >/dev/null'
 check "tree: agent pane HERDR_AGENT hint" 'printf "%s" "$tree" | jq -e ".root.second.env.HERDR_AGENT == \"claude\"" >/dev/null'
 
@@ -147,12 +168,140 @@ cat > "$MOCK_ENGINES" <<EOF
 { "mode": "podman-rootless",
   "containers": [ {"id":"p1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
 EOF
-rm -f "$d/stubs/docker"                  # simulate a podman-only machine
+rm -f "$d/stubs/docker"                  # simulate a podman-only machine:
+export PATH="$d/stubs:$(path_scrub docker)"  # no mock docker AND no ambient docker
 printf 'claude\n' > "$d/agents-present"
 export HOME="$d/home"
 bash "$ROOT/scripts/discover.sh" >"$d/out" 2>&1 || true
 check "podman-only discovery works"      'grep -q "created workspace" "$d/out"'
 check "scoped docker->podman shim generated" '[ -x "$HERDR_PLUGIN_STATE_DIR/shim/docker" ]'
+
+# ------------------------------------------- pane entrypoints (exec-dc fix) --
+echo "# pane entrypoints"
+
+new_scenario pane-entrypoints; d=$SCENARIO_DIR
+printf '{"mode":"docker-rootful","containers":[]}' > "$MOCK_ENGINES"
+export HOME="$d/home"
+DEVCONTAINER_FOLDER="$d/home/project-a" bash "$ROOT/scripts/pane-shell.sh" >"$d/s.out" 2>&1
+check "pane-shell execs bash in container (function dc, not /usr/bin/dc)" \
+  'grep -q "devcontainer.exec exec --workspace-folder $d/home/project-a bash" "$MOCK_CALLS"'
+DEVCONTAINER_FOLDER="$d/home/project-a" DC_AGENT_KIND=claude HERDR_AGENT=claude \
+  bash "$ROOT/scripts/pane-agent.sh" >"$d/a.out" 2>&1
+check "pane-agent execs agent kind in container" \
+  'grep -q "devcontainer.exec exec --workspace-folder $d/home/project-a claude" "$MOCK_CALLS"'
+
+# --------------------------------------- event hook payload shapes (0.9.3) --
+echo "# workspace.closed payload shapes"
+
+new_scenario event-payload; d=$SCENARIO_DIR
+source "$ROOT/scripts/lib.sh"; load_config; state_init
+map_file="$HERDR_PLUGIN_STATE_DIR/sessions/mock-1/containers.json"
+unset HERDR_PANE_ID HERDR_PLUGIN_CONTEXT_JSON || true
+jq -n --arg f "$d/home/project-a" '{($f):{workspace_id:"wX",container_id:"c1",agents:[]}}' > "$map_file"
+export HERDR_PLUGIN_EVENT_JSON='{"event":"workspace_closed","data":{"type":"workspace_closed","workspace_id":"wX","workspace":null}}'
+out=$(bash "$ROOT/scripts/on-workspace-closed.sh" 2>&1)
+remaining=$(jq -r --arg f "$d/home/project-a" '.[$f] // empty' "$map_file" 2>/dev/null)
+check "observed 0.9.3 payload (.data.workspace_id) tombstones folder" '[ -f "$(tombstone_path "$d/home/project-a")" ]'
+check "observed payload removes mapping" '[ -z "$remaining" ]'
+jq -n --arg f "/legacy/proj" '{($f):{workspace_id:"wY",container_id:"c2",agents:[]}}' > "$map_file"
+export HERDR_PLUGIN_EVENT_JSON='{"workspace_id":"wY"}'
+bash "$ROOT/scripts/on-workspace-closed.sh" >/dev/null 2>&1
+check "legacy flat payload shape still handled" '[ -f "$(tombstone_path "/legacy/proj")" ]'
+jq -n --arg f "/ctx/proj" '{($f):{workspace_id:"wZ",container_id:"c3",agents:[]}}' > "$map_file"
+export HERDR_PLUGIN_EVENT_JSON=''
+export HERDR_PLUGIN_CONTEXT_JSON='{"workspace_id":"wZ","invocation_source":"api"}'
+bash "$ROOT/scripts/on-workspace-closed.sh" >/dev/null 2>&1
+check "context-json fallback when event json empty" '[ -f "$(tombstone_path "/ctx/proj")" ]'
+unset HERDR_PLUGIN_CONTEXT_JSON
+export HERDR_PLUGIN_EVENT_JSON='{"foo":1}'
+out=$(bash "$ROOT/scripts/on-workspace-closed.sh" 2>&1); rc=$?
+check "unparseable payload exits 0 and logs keys" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "keys: foo"'
+
+# ------------------------------------------- shell-here target/fallback ----
+echo "# shell-here pane open"
+
+new_scenario shell-here; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/sessions/mock-1/containers.json")
+cat > "$MOCK_PANES" <<EOF
+{"result":{"panes":[{"pane_id":"$ws:p1","workspace_id":"$ws","label":"shell"}]}}
+EOF
+export HERDR_PLUGIN_CONTEXT_JSON='{"invocation_source":"cli","correlation_id":"cli:plugin"}'
+export HERDR_PANE_ID="$ws:p1"
+bash "$ROOT/scripts/open-shell.sh" >"$d/o1" 2>&1
+check "shell-here recovers ws from HERDR_PANE_ID (CLI invocation)" 'grep -q "opening devcontainer shell for" "$d/o1"'
+check "split attempted with target pane" 'grep -q "placement=split target=$ws:p1" "$MOCK_CALLS"'
+check "opened via split" 'grep -q "opened devcontainer shell pane (split)" "$d/o1"'
+MOCK_PANE_OPEN_MODE=fail-split bash "$ROOT/scripts/open-shell.sh" >"$d/o2" 2>&1
+check "falls back to tab placement when split unavailable" 'grep -q "placement=tab" "$MOCK_CALLS" && grep -q "opened devcontainer shell pane (tab)" "$d/o2"'
+
+# ------------------------------------------------ session-scoped state ------
+echo "# session scoping"
+
+new_scenario session-scope; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+HERDR_SESSION=sesA bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
+HERDR_SESSION=sesB bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
+check "state scoped per HERDR_SESSION" '[ -f "$HERDR_PLUGIN_STATE_DIR/sessions/sesA/containers.json" ] && [ -f "$HERDR_PLUGIN_STATE_DIR/sessions/sesB/containers.json" ]'
+check "no unscoped top-level containers.json" '! [ -f "$HERDR_PLUGIN_STATE_DIR/containers.json" ]'
+HERDR_SESSION=sesA POLL_SECS=0.3 bash "$ROOT/scripts/watcher.sh" >"$d/w.log" 2>&1 &
+wpid=$!; sleep 0.8
+check "watcher lock is per-session" '[ -f "$HERDR_PLUGIN_STATE_DIR/sessions/sesA/watcher.lock" ]'
+kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+
+# ------------------------------------------- startup guard + rescan race ---
+echo "# startup watcher guard + concurrent rescan"
+
+# watchers_of <session> — pids of watcher.sh processes scoped to one HERDR_SESSION
+# (reading /proc/<pid>/environ keeps the checks safe on machines that run a real
+# watcher from this checkout, and immune to parallel test runs).
+watchers_of() {
+  local p
+  for p in $(pgrep -f "scripts/watcher.sh" 2>/dev/null); do
+    if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q "^HERDR_SESSION=$1\$"; then
+      echo "$p"
+    fi
+  done
+}
+
+new_scenario startup-guard; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+HERDR_SESSION=guardA bash "$ROOT/scripts/startup.sh" >"$d/su1.log" 2>&1
+sleep 0.7
+n=$(watchers_of guardA | wc -l)
+check "startup spawns watcher when lock is free" '[ "$n" -ge 1 ]'
+watchers_of guardA | xargs -r kill 2>/dev/null; sleep 0.3
+flock "$HERDR_PLUGIN_STATE_DIR/sessions/guardA/watcher.lock" -c 'sleep 2' &
+holdpid=$!; sleep 0.2
+HERDR_SESSION=guardA bash "$ROOT/scripts/startup.sh" >"$d/su2.log" 2>&1
+sleep 0.7
+n2=$(watchers_of guardA | wc -l)
+check "startup skips spawn when lock is held" '[ "$n2" -eq 0 ]'
+wait "$holdpid" 2>/dev/null || true
+
+new_scenario rescan-race; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 &
+bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 &
+wait
+check "concurrent rescans create exactly one space" '[ "$(grep -c "workspace.create" "$MOCK_CALLS")" -eq 1 ]'
 
 # ---------------------------------------------------------------- watcher ----
 echo "# watcher.sh"
@@ -165,7 +314,7 @@ EOF
 printf 'claude\n' > "$d/agents-present"
 export HOME="$d/home"
 bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
-ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/containers.json")
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/sessions/mock-1/containers.json")
 
 # Two panes in the managed workspace:
 #   p1 "shell"  — generic shell where the user started claude from the prompt
@@ -197,6 +346,7 @@ cat > "$d/rules.json" <<'EOF'
 EOF
 sleep 1.2
 check "watcher releases on agent exit"   'grep -q "released claude" "$d/watcher.log"'
+check "pane list --json rejected (0.9.3 CLI contract)" '! hr pane list --json >/dev/null 2>&1'
 kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
 check "report-agent call recorded"       'grep -q "pane.report-agent" "$MOCK_CALLS"'
 check "release-agent call recorded"      'grep -q "pane.release-agent" "$MOCK_CALLS"'

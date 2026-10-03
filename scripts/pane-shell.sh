@@ -15,4 +15,6 @@ command -v devcontainer >/dev/null 2>&1 || die "devcontainer CLI not found on PA
 engine_detect || die "no container engine (docker/podman)"
 
 printf '\x1b[1;36m▸ devcontainer shell — %s\x1b[0m\n' "$FOLDER"
-exec dc exec --workspace-folder "$FOLDER" bash
+# NOTE: no `exec` here on purpose — exec bypasses bash functions, so `exec dc …`
+# would run /usr/bin/dc (the desk calculator) instead of lib.sh's dc() wrapper.
+dc exec --workspace-folder "$FOLDER" bash
