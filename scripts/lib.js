@@ -324,6 +324,13 @@ export function presenceMatch(kind, text, title, markers) {
   const m = markers[kind];
   if (!m) return false;
   if ((m.title || []).length) return m.title.some((re) => re.test(title || ''));
+  // Shell-prompt guard: after an agent exits, its banner stays in the ~40-line
+  // detection viewport, so content markers remain hot. But an exited pane ends
+  // its viewport with a bare shell prompt — a running TUI never does. Prompt at
+  // the bottom => the shell owns the screen => content markers are ignored.
+  const lines = String(text || '').split('\n').filter((l) => l.trim());
+  const last = lines[lines.length - 1] || '';
+  if (/[$#❯➜]\s*$/.test(last)) return false;
   const hits = (m.content || []).filter((re) => re.test(text || '')).length;
   return hits >= (m.minContent ?? 1);
 }

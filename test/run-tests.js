@@ -355,11 +355,14 @@ test('presence markers: title + multi-hit content; exit banner does not match', 
   assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner + cleared title');
   assert.equal(hit(bare, '@abc123: /bin/bash'), 'false', 'bare prompt');
   assert.equal(hit('hati@monster: ~/x', 'hati@monster: ~/x'), 'false', 'host prompt');
-  // claude / codex / opencode: multi-hit content defaults
+  // claude / codex / opencode: multi-hit content defaults + prompt guard
   assert.equal(hit('Welcome to Claude Code\n╭──────────╮\n claude', '@c: /bin/bash', 'claude'), 'true', 'claude idle UI');
   assert.equal(hit('some log line', '@c: /bin/bash', 'claude'), 'false', 'claude: single stray string');
+  assert.equal(hit('Welcome to Claude Code\nClaude Code\n\nroot ➜ /workspaces/x $ ', '@c: /bin/bash', 'claude'), 'false', 'claude exited: banner in scrollback + prompt at bottom');
   assert.equal(hit('OpenAI Codex v0.9\nesc to interrupt', '@c: /bin/bash', 'codex'), 'true', 'codex idle UI');
+  assert.equal(hit('OpenAI Codex\nesc to interrupt\n$ ', '@c: /bin/bash', 'codex'), 'false', 'codex exited: prompt at bottom');
   assert.equal(hit('opencode\nCtrl+C to exit', '@c: /bin/bash', 'opencode'), 'true', 'opencode idle UI');
+  assert.equal(hit('opencode\nCtrl+C to exit\nroot@x:~# ', '@c: /bin/bash', 'opencode'), 'false', 'opencode exited: prompt at bottom');
   assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', '', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true', 'user override');
 });
 
