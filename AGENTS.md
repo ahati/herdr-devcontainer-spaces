@@ -4,94 +4,103 @@ Guidance for AI agents (and humans) working in this repository.
 
 ## What this is
 
-`herdr-devcontainer-spaces` — a [Herdr](https://herdr.dev) plugin (bash + jq) that:
+`herdr-devcontainer-spaces` — a [Herdr](https://herdr.dev) plugin (Node ESM, zero
+npm deps, no build step; bash survives only in test fixtures) that:
 
 1. discovers devcontainers via the `devcontainer.local_folder` docker/podman label
-   (docker **and** podman, rootless **and** rootful),
+   (docker **and** podman, rootless **and** rootful), live via an engine-event stream,
 2. creates a Herdr workspace ("space") per devcontainer, named **the directory name
    only** (`basename` — no path, no suffix; this is a product decision, do not add
-   suffixes), with panes that run `devcontainer exec --workspace-folder <dir> bash`
-   plus a `HERDR_AGENT`-hinted agent pane,
-3. runs a watcher daemon that makes *ad-hoc* agents started inside those containers
-   visible to Herdr (`pane read --source detection` → `agent explain --file` →
-   `pane report-agent` / `pane release-agent`).
+   suffixes), whose terminals run inside the container (`devcontainer exec`); **every
+   new tab/split in a managed space is auto-converted** to an in-container terminal;
+   agents are probed and recorded but **never auto-started** (`AUTO_START_AGENTS=0`),
+3. makes *ad-hoc* agents started inside those containers visible to Herdr: watcher
+   classifies each managed pane's detection viewport (`agent explain` + presence
+   markers) and reports/releases with monotonic `--seq`,
+4. closes cleanly: tombstones are **session-scoped** (a closed space returns at the
+   next session start or container restart; `TOMBSTONE_SESSION_ONLY=0` restores the
+   old persistent behavior).
 
 ## Layout
 
 ```
-herdr-plugin.toml      manifest (id: devcontainer-spaces, min_herdr_version: 0.9.0)
-scripts/lib.js         shared core (Node ESM, zero deps): config, session-scoped state,
-                       herdr CLI + socket client, engine abstraction, layouts
+herdr-plugin.toml      manifest (id: devcontainer-spaces; keybindings + actions + events)
+scripts/lib.js         shared core: config, session-scoped state, herdr CLI + NDJSON
+                       socket client, engine abstraction, layouts, presence markers
 scripts/discover.js    rescan + resurrect (idempotent, tombstone-aware, race-locked)
-scripts/watcher.js     agent-state poll daemon (one per session, lock-guarded)
-scripts/events-subscribe.js  socket event pump (tab/pane conversion, push-based)
-scripts/on-terminal-created.js  conversion policy (invoked per push event)
-scripts/startup.js     [[startup]] hook: rescan + spawn watcher/subscriber
-scripts/*.js           actions (shell-here, agent-here), event hook, pane entrypoints
-test/run-tests.js      node:test suite (17 tests; runs anywhere node ≥18 exists)
+scripts/watcher.js     agent detection poll + engine-event stream (live discovery)
+scripts/events-subscribe.js  socket event pump (tab/pane conversion, restore grace)
+scripts/on-terminal-created.js  conversion policy (per push event)
+scripts/on-workspace-closed.js  tombstone hook
+scripts/startup.js     [[startup]]: rescan + spawn daemons (flock-wrapped, logged)
+scripts/open-shell.js / start-agent.js   actions (shell-here / agent-here)
+scripts/pane-shell.js / pane-agent.js    [[panes]] entrypoints (in-container exec)
+test/run-tests.js      node:test suite (20 tests; node ≥18; never hangs — it fails)
 test/mock/bin/         stub docker/podman/devcontainer/herdr/api — heredoc-driven
-test/TESTING.md        full test instructions — READ BEFORE RUNNING LIVE TESTS
+test/TESTING.md        live-test levels — READ BEFORE RUNNING LIVE TESTS
 docs/01..04-*.md       research + design background
 ```
-
-All plugin code is Node ESM (no npm dependencies, no build step). The only
-external requirements: `node` ≥ 18, `jq` (parity guard), and for pane entrypoints
-the `devcontainer` CLI. Locks use `flock` (watcher/subscriber spawn guards) and
-an mkdir-based lock for state mutations.
 
 ## Environment notes
 
 - The authoring dev container has **herdr 0.9.3, jq, node, bash, gh, a working
   rootless docker** (client+server 29.8.1, via `DOCKER_HOST=unix:///run/user/1000/docker.sock`),
-  and the **devcontainer CLI 0.89.0** (npm/nvm path) — but still **no podman**. Levels
-  0–2 and the docker half of level 3 can now run in-container; the podman matrix still
-  needs another machine. Follow [test/TESTING.md](test/TESTING.md).
-- `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH` may be set ambiently; scripts honor them by
-  design. Tests pin `HERDR_BIN_PATH` to the mock — keep it that way, or you will create
-  real workspaces in a live herdr session.
+  the **devcontainer CLI 0.89.0**, and **no podman** (podman matrix needs another
+  machine). Follow [test/TESTING.md](test/TESTING.md).
+- `HERDR_BIN_PATH` and `HERDR_SOCKET_PATH` may be set ambiently (panes get them!);
+  scripts honor them by design. Tests pin `HERDR_BIN_PATH` to the mock — keep it that
+  way, or you will create real workspaces in a live herdr session.
 - Never start/stop herdr servers or create workspaces outside a **named test session**
-  (`HERDR_SESSION=dcsp-test`) on a machine that has a live default session.
+  (`HERDR_SESSION=dcsp-test`) on a machine that has a live default session. Daemon
+  logs: `sessions/<name>/{watcher,subscriber}.log` under the plugin state dir.
 
-## Non-obvious implementation constraints
+## herdr 0.9.3 API contracts (hard-won; do not regress)
 
-- The herdr CLI has **no raw socket passthrough** (`herdr api` is only
-  `snapshot`/`schema`), so `layout.apply` goes over the newline-delimited JSON socket
-  via node or python3 (`api_request` in lib.sh; test seam: `HERDR_API_STUB`).
-- Plain `pane split` cannot launch custom argv — custom pane commands come from either
-  socket `layout.apply` (preferred) or the manifest `[[panes]]` entrypoints (fallback).
-- `HERDR_AGENT=<kind>` must be set **host-side** (pane env); setting it inside the
-  container is invisible to Herdr.
-- One lifecycle authority per pane: hinted panes belong to Herdr, generic shells to the
-  watcher (`custom:devcontainer` source). Never mix on one pane.
-- The devcontainer CLI needs a docker-compatible backend; on podman-only machines the
-  plugin may generate a **scoped** `docker`→`podman` shim under plugin state and
-  prepend it to PATH only for its own invocations — never modify the user's PATH.
-- Plugins are one-shot startup hooks + detached daemons; the watcher must exit when the
-  socket dies and get restarted by the next `[[startup]]`.
+- `layout.apply` takes **exactly one** of `tab_id` / `workspace_id` (omit null keys);
+  `tab_id` mode replaces the tab (used for conversion), `workspace_id` adds one.
+- `pane report-agent` / `release-agent` need a **monotonic `--seq` per (pane, source)**;
+  herdr silently ignores non-increasing sequences. The per-pane counter must survive
+  agent restarts (else re-launches are invisible) — keep `{agent: null, seq}` on release.
+- `workspace.closed` payload wraps the id: `.data.workspace_id`.
+- `pane list` prints JSON by default (**no `--json` flag**); `herdr api schema` answers
+  **locally** (never use it as a liveness probe).
+- The `[[events]]` manifest whitelist has **no tab/pane lifecycle names** — push-based
+  conversion rides the socket `events.subscribe` API (`tab.created`, `pane.created`,
+  dot-named). Session restore replays `tab.created` for restored tabs → the subscriber
+  ignores events for `RESTORE_GRACE_MS` after start.
+- `HERDR_SESSION` selects the session socket for the CLI; a named session must
+  **never** fall back to the primary socket (a stale daemon would attach to the user's
+  live default session).
+- Plugin `contexts` is a free-form, unvalidated hint; 0.9.3 has **no command palette
+  and no plugin entries in the spaces context menu** — keybindings + CLI are the only
+  action surfaces.
+- The detection viewport is ~40 lines and **retains agent banners after exit** —
+  content markers alone keep dead agents "alive". Presence = title pattern (agents
+  that set one) or multi-hit content **guarded by a shell-prompt-at-last-line check**.
+- `HERDR_AGENT=<kind>` must be set host-side (pane env); one lifecycle authority per
+  pane (hinted panes → Herdr; generic shells → watcher, source `custom:devcontainer`).
+- The devcontainer CLI needs a docker-compatible backend; on podman-only machines a
+  **scoped** `docker`→`podman` shim is generated under plugin state (never touch the
+  user's PATH). Agent probing uses both `sh -lc` and `bash -ic` (bashrc-only PATHs).
 
 ## Testing
 
 ```bash
-bash -n scripts/../test/mock/bin/* 2>/dev/null; node --check scripts/*.js test/run-tests.js && \
-  timeout 280 node test/run-tests.js   # expect: 17 tests, 0 failed (~15s)
+node --check scripts/*.js test/run-tests.js && \
+  timeout 280 node test/run-tests.js   # expect: 20 tests, 0 failed (~15s)
 ```
 
-The suite is Node (`node:test`) with per-test timeouts and a self-watchdog — it
-never hangs, it fails. Mock fixtures in `test/mock/bin/` remain tiny bash stubs
-(test-only code). Requires `node` ≥ 18 (already required at runtime).
+Per-test timeouts + a self-watchdog: the suite never hangs, it fails. Scenarios scrub
+ambient engine env (`DOCKER_HOST`, real `docker` on PATH) by construction. Daemon
+tests reap what they spawn — never leak subscribers onto the primary socket.
 
-For live tests (herdr smoke, docker/podman end-to-end, engine matrix, lifecycle),
-**follow [test/TESTING.md](test/TESTING.md) exactly** — it defines levels, named
-session usage, pass criteria, and cleanup.
+For live tests, **follow [test/TESTING.md](test/TESTING.md) exactly**.
 
 ## Publishing (maintainers only)
 
-Do **not** publish without owner approval. When approved:
-
-```bash
-gh repo create ahati/herdr-devcontainer-spaces --public --source . --push
-gh repo edit ahati/herdr-devcontainer-spaces --add-topic herdr-plugin
-```
-
-Marketplace indexing requires the `herdr-plugin` topic and the manifest at repo root
-(already the case).
+Do **not** push/publish without owner approval. The repo is live at
+`ahati/herdr-devcontainer-spaces` (topic `herdr-plugin`, marketplace-indexed);
+shipping = commit → `git push origin main` → `herdr plugin install
+ahati/herdr-devcontainer-spaces -y` on target machines → restart Herdr (the TUI
+keymap only refreshes on full restart). Beware: `herdr plugin unlink` in *any*
+session can remove a globally installed plugin.
