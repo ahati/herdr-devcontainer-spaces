@@ -277,29 +277,40 @@ export function probeAgents(engine, folder, kinds) {
 
 // ------------------------------------------------- agent presence markers ---
 // herdr's screen manifests decide the agent STATE, but some agents' idle screens
-// match no manifest rule (observed: pi 2026.10 on herdr 0.9.3 — explain answers
-// `idle` + `default_known_agent_idle_fallback` for ANY screen, which carries no
-// evidence). These content/title markers are the plugin's own presence signal.
-// Extend per agent via settings.env: MARKERS_pi='Antigravity|foo' (a regex).
+// match no manifest rule (observed: pi 2026.10 on herdr 0.9.3). These markers are
+// the plugin's own presence signal. Two lessons baked in:
+//   * the pane TITLE is the cleanest live/dead signal (pi sets 'π - …' while
+//     running; the shell resets it on exit)
+//   * content markers must require MULTIPLE distinct hits — pi's exit banner
+//     itself prints '⬢ Antigravity-Mode (always)', which kept a single-hit match
+//     alive forever after the agent exited
+// Extend per agent via settings.env: MARKERS_pi='Antigravity|foo' (regex, any hit).
 const PRESENCE_MARKERS = {
-  pi: [/π - /, /Antigravity-Mode/, /pi-agy-mode/],
+  pi: {
+    title: [/^π - /],
+    content: [/Antigravity-Mode/, /pi-agy-mode/, /GLM-\d[\w.-]*-Flash/],
+    minContent: 2,
+  },
 };
 
 export function compileMarkers(cfg) {
   const out = {};
-  for (const [k, v] of Object.entries(PRESENCE_MARKERS)) out[k] = v.slice();
+  for (const [k, v] of Object.entries(PRESENCE_MARKERS)) out[k] = v;
   for (const key of Object.keys(cfg)) {
     const m = key.match(/^MARKERS_([a-z0-9_-]+)$/i);
     if (m && cfg[key]) {
-      try { out[m[1].toLowerCase()] = [new RegExp(cfg[key])]; } catch (e) { warn(`invalid ${key} regex: ${e.message}`); }
+      try { out[m[1].toLowerCase()] = { title: [], content: [new RegExp(cfg[key])], minContent: 1 }; } catch (e) { warn(`invalid ${key} regex: ${e.message}`); }
     }
   }
   return out;
 }
 
-export function presenceMatch(kind, text, markers) {
-  const list = markers[kind] || [];
-  return list.some((re) => re.test(text));
+export function presenceMatch(kind, text, title, markers) {
+  const m = markers[kind];
+  if (!m) return false;
+  if ((m.title || []).some((re) => re.test(title || ''))) return true;
+  const hits = (m.content || []).filter((re) => re.test(text || '')).length;
+  return hits >= (m.minContent ?? 1);
 }
 
 // ---------------------------------------------------------------- layout ---

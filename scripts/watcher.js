@@ -5,9 +5,13 @@
 // panes (labeled) are Herdr's — skipped. Single instance per session (lock dir).
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   log, loadConfig, state, hr, hrJson, SESSION_DIR, compileMarkers, presenceMatch,
+  detectEngine,
 } from './lib.js';
+
+const SCRIPT_DIR = path.dirname(new URL(import.meta.url).pathname);
 
 const cfg = loadConfig();
 const MARKERS = compileMarkers(cfg);
@@ -33,6 +37,46 @@ process.on('SIGTERM', () => process.exit(0));
 
 log(`watcher started (poll=${cfg.POLL_SECS}s)`);
 
+// ------------------------------------------ engine events (live discovery) --
+// Streams `docker|podman events` filtered to devcontainer-labeled containers:
+//   * container start  -> debounced discover (new/returning devcontainers get
+//                         their space without a manual rescan)
+//   * container die    -> mark the space's subtext so the sidebar shows it
+const eventsChild = (() => {
+  const eng = detectEngine({ ENGINE: 'auto' });
+  if (!eng) return null;
+  const p = spawn(eng.engine, ['events', '--filter', 'label=devcontainer.local_folder', '--format', '{{json .}}'],
+    { stdio: ['ignore', 'pipe', 'inherit'] });
+  let lastRescan = 0;
+  let buf = '';
+  p.stdout.on('data', (d) => {
+    buf += d.toString('utf8');
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      let ev; try { ev = JSON.parse(line); } catch { continue; }
+      const action = ev.Action || ev.action || '';
+      const folder = ev.Actor?.Attributes?.['devcontainer.local_folder'] || ev.actor?.attributes?.['devcontainer.local_folder'] || '';
+      if (action === 'start') {
+        if (Date.now() - lastRescan < 10000) continue;   // debounce
+        lastRescan = Date.now();
+        log(`engine event: devcontainer started (${folder || 'unknown folder'}); rescanning`);
+        spawnSync(process.execPath, [path.join(SCRIPT_DIR, 'discover.js')], { stdio: 'inherit', timeout: 120000 });
+      } else if (action === 'die') {
+        const ws = Object.entries(state.containers()).find(([, v]) => v.container_id === (ev.id || ev.Id || ''))?.[1];
+        if (ws) {
+          log(`engine event: devcontainer died (${folder}); marking space ${ws.workspace_id}`);
+          hr(['workspace', 'report-metadata', ws.workspace_id, '--source', 'custom:devcontainer-spaces',
+            '--token', 'subtext=devcontainer (stopped)']);
+        }
+      }
+    }
+  });
+  return p;
+})();
+process.on('exit', () => { try { eventsChild?.kill(); } catch { /* gone */ } });
+
 // classify — herdr's manifests decide the state when they actually match; a
 // fallback-derived idle is NOT evidence (explain falls back on any screen for a
 // known agent kind). Presence markers close the gap for agents whose idle UI
@@ -44,7 +88,7 @@ function classify(snapFile, snapText, title, kind) {
     const st = r.json.state || '';
     if (st && st !== 'unknown' && !(r.json.idle_fallback_reason || r.json.fallback_reason)) return st;
   }
-  if (presenceMatch(kind, `${snapText}\n${title}`, MARKERS)) return 'idle';
+  if (presenceMatch(kind, snapText, title, MARKERS)) return 'idle';
   return '';
 }
 

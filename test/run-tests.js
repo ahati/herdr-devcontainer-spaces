@@ -341,17 +341,20 @@ test('startup: watcher spawn + held-lock skip', { timeout: 60000 }, async () => 
   holder.kill();
 });
 
-test('presence markers: pi detected without manifest match; bare prompt not', { timeout: T.test }, async () => {
+test('presence markers: title + multi-hit content; exit banner does not match', { timeout: T.test }, async () => {
   scenario('presence');
-  const piScreen = '      ▄▀▀▄        Antigravity-Mode\n     ▀▀▀▀▀▀       GLM-5.3-Flash (always)\npi-agy-mode · agy-compatible surface\n';
+  const piRunning = '      ▄▀▀▄        Antigravity-Mode\nGLM-5.3-Flash (always)\npi-agy-mode · agy-compatible surface\n';
+  const piExitBanner = '⬢ Antigravity-Mode (always)\n\nroot ➜ /workspaces/x $ ';
   const bare = 'root@container:~$ ';
-  const code = (text, kind) => `unused`;
-  const hit = (t, k) => nodeLib(`console.log(lib.presenceMatch(process.env.K, process.env.T, lib.compileMarkers({})))`, { T: t, K: k }).stdout.trim();
-  assert.equal(hit(piScreen, 'pi'), 'true');
-  assert.equal(hit(bare, 'pi'), 'false');
-  assert.equal(hit('hati@monster: ~/x', 'pi'), 'false');
-  // user-extensible via settings-style keys
-  assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true');
+  const hit = (t, title, k = 'pi') => nodeLib(
+    `console.log(lib.presenceMatch(process.env.K, process.env.T, process.env.TITLE, lib.compileMarkers({})))`,
+    { T: t, TITLE: title, K: k }).stdout.trim();
+  assert.equal(hit(piRunning, 'π - hexagon-compiler'), 'true', 'running TUI: title match');
+  assert.equal(hit(piRunning, '@abc123: /bin/bash'), 'true', 'running TUI: 3 content hits');
+  assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner alone (1 hit) must NOT match');
+  assert.equal(hit(bare, '@abc123: /bin/bash'), 'false', 'bare prompt');
+  assert.equal(hit('hati@monster: ~/x', 'hati@monster: ~/x'), 'false', 'host prompt');
+  assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', '', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true', 'user override');
 });
 
 test('restore grace + space subtext + repair', { timeout: T.test }, () => {
@@ -375,6 +378,32 @@ test('restore grace + space subtext + repair', { timeout: T.test }, () => {
   const r = run('discover.js');
   assert.equal(calls().split('\n').filter((l) => l.startsWith('LAYOUT ')).length, layouts0 + 1, 'repaired layout re-applied');
   assert.ok(r.stderr.includes('repaired devcontainer tab layout'));
+});
+
+test('engine events: container start triggers discovery, die marks the space', { timeout: 60000 }, async () => {
+  scenario('engine-events');
+  engines({ mode: 'docker-rootful', containers: [] });          // nothing yet
+  const evFile = `${SC.env.MOCK_ENGINES}.events`;
+  fs.writeFileSync(evFile, '');
+  const logF = path.join(SC.d, 'watcher.log');
+  const w = track(spawn(process.execPath, [path.join(SCRIPTS, 'watcher.js')], {
+    env: { ...SC.env, POLL_SECS: '0.3' }, stdio: ['ignore', fs.openSync(logF, 'a'), fs.openSync(logF, 'a')],
+  }));
+  await new Promise((r) => setTimeout(r, 700));
+  // a devcontainer comes up
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  fs.appendFileSync(evFile, JSON.stringify({ Action: 'start', id: 'c1', Actor: { Attributes: { 'devcontainer.local_folder': `${SC.d}/home/project-a` } } }) + '\n');
+  await new Promise((r) => setTimeout(r, 2500));
+  const wl = () => fs.readFileSync(logF, 'utf8');
+  assert.ok(wl().includes('devcontainer started'), 'start event seen');
+  assert.ok(calls().includes('workspace.create'), 'discovery ran from engine event');
+  // it dies
+  fs.appendFileSync(evFile, JSON.stringify({ Action: 'die', id: 'c1', Actor: { Attributes: { 'devcontainer.local_folder': `${SC.d}/home/project-a` } } }) + '\n');
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.ok(wl().includes('devcontainer died'), 'die event seen');
+  assert.ok(calls().includes('subtext=devcontainer (stopped)'), 'space marked stopped');
+  w.kill('SIGTERM');
+  await new Promise((r) => w.on('exit', r));
 });
 
 test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () => {

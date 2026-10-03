@@ -17,6 +17,12 @@ case "$1" in
     esac ;;
   context) echo "default" ;;
   ps)      jq -r '.containers[].id' "$MOCK_ENGINES" ;;
+  events)
+  # engine event stream for the watcher's live-discovery: JSON lines from
+  # $MOCK_ENGINES.events, then follow (appends are delivered live).
+  f="${MOCK_ENGINES}.events"
+  [ -f "$f" ] && tail -f "$f"
+  exit 0 ;;
   inspect)
     row=$(jq -r --arg id "$id" '.containers[] | select(.id==$id)' "$MOCK_ENGINES")
     case "$tmpl" in
