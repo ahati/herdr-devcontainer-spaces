@@ -399,12 +399,16 @@ test('engine events: container start triggers discovery, die marks the space', {
     env: { ...SC.env, POLL_SECS: '0.3' }, stdio: ['ignore', fs.openSync(logF, 'a'), fs.openSync(logF, 'a')],
   }));
   await new Promise((r) => setTimeout(r, 700));
+  // a closed (tombstoned) space returns when its container restarts
+  const tb = (f) => nodeLib(`console.log(lib.tombstonePath(process.env.TF))`, { TF: f }).stdout.trim();
+  fs.writeFileSync(tb(`${SC.d}/home/project-a`), 'x');
   // a devcontainer comes up
   engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
   fs.appendFileSync(evFile, JSON.stringify({ Action: 'start', id: 'c1', Actor: { Attributes: { 'devcontainer.local_folder': `${SC.d}/home/project-a` } } }) + '\n');
   await new Promise((r) => setTimeout(r, 2500));
   const wl = () => fs.readFileSync(logF, 'utf8');
   assert.ok(wl().includes('devcontainer started'), 'start event seen');
+  assert.ok(!fs.existsSync(tb(`${SC.d}/home/project-a`)), 'restart cleared the tombstone');
   assert.ok(calls().includes('workspace.create'), 'discovery ran from engine event');
   // it dies
   fs.appendFileSync(evFile, JSON.stringify({ Action: 'die', id: 'c1', Actor: { Attributes: { 'devcontainer.local_folder': `${SC.d}/home/project-a` } } }) + '\n');

@@ -7,7 +7,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  log, loadConfig, state, hr, hrJson, SESSION_DIR, compileMarkers, presenceMatch,
+  log, loadConfig, state, tombstone, hr, hrJson, SESSION_DIR, compileMarkers, presenceMatch,
   detectEngine,
 } from './lib.js';
 
@@ -61,6 +61,14 @@ const eventsChild = (() => {
       if (action === 'start') {
         if (Date.now() - lastRescan < 10000) continue;   // debounce
         lastRescan = Date.now();
+        // A restarted/re-upped devcontainer is clear intent to have the space:
+        // clear any tombstone so discover recreates it. This is the recovery
+        // path that needs no keybinding, palette, or CLI — close a space and
+        // `devcontainer up` (or docker start) brings it right back.
+        if (folder && tombstone.has(folder)) {
+          tombstone.clear(folder);
+          log(`engine event: container restarted; tombstone cleared for ${folder}`);
+        }
         log(`engine event: devcontainer started (${folder || 'unknown folder'}); rescanning`);
         spawnSync(process.execPath, [path.join(SCRIPT_DIR, 'discover.js')], { stdio: 'inherit', timeout: 120000 });
       } else if (action === 'die') {
