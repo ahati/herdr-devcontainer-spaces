@@ -303,6 +303,29 @@ bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 &
 wait
 check "concurrent rescans create exactly one space" '[ "$(grep -c "workspace.create" "$MOCK_CALLS")" -eq 1 ]'
 
+# ------------------------------------------------- socket routing (lib) ----
+echo "# socket routing"
+
+new_scenario socket-routing; d=$SCENARIO_DIR
+source "$ROOT/scripts/lib.sh"
+mkdir -p "$d/home/.config/herdr/sessions/sesX"
+mksock() {  # create a real unix socket file (herdr_socket tests -S)
+  python3 -c "import socket; socket.socket(socket.AF_UNIX).bind('$1')" 2>/dev/null \
+    || node -e "require('net').createServer().listen('$1')" 2>/dev/null || return 1
+}
+if mksock "$d/home/.config/herdr/herdr.sock" && mksock "$d/home/.config/herdr/sessions/sesX/herdr.sock"; then
+  export HOME="$d/home"; unset HERDR_SOCKET_PATH
+  export HERDR_SESSION=sesX
+  out=$(herdr_socket)
+  check "named session wins over existing default socket" '[ "$out" = "'$d'/home/.config/herdr/sessions/sesX/herdr.sock" ]'
+else
+  check "named session wins over existing default socket (skipped: no python3/node)" 'true'
+fi
+export HERDR_SOCKET_PATH=/tmp/explicit.sock
+out2=$(herdr_socket)
+check "explicit HERDR_SOCKET_PATH wins over session" '[ "$out2" = "/tmp/explicit.sock" ]'
+unset HERDR_SOCKET_PATH
+
 # -------------------------------------- terminal conversion (tabs/splits) ---
 echo "# terminal conversion (tab_created / pane_created)"
 

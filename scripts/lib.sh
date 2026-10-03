@@ -35,7 +35,7 @@ require_cmds() {
 #   ENGINE=auto|docker|podman
 #   AUTO_CREATE_SPACES=1|0
 #   AUTO_START_CONTAINERS=1|0        # run `devcontainer up` for stopped containers
-#   AGENTS="claude codex gemini cursor opencode copilot"
+#   AGENTS="claude codex gemini cursor opencode copilot agy"
 #   TAB_LABEL=devcontainer
 #   POLL_SECS=3
 
@@ -46,7 +46,7 @@ CONFIG_FILE="$CONFIG_DIR/settings.env"
 ENGINE=auto
 AUTO_CREATE_SPACES=1
 AUTO_START_CONTAINERS=0
-AGENTS="claude codex gemini cursor opencode copilot"
+AGENTS="claude codex gemini cursor opencode copilot agy"
 TAB_LABEL="devcontainer"
 POLL_SECS="${POLL_SECS:-3}"   # default 3s; env may pre-set (tests), settings.env overrides
 
@@ -63,10 +63,17 @@ HERDR_BIN="${HERDR_BIN_PATH:-herdr}"
 hr() { "$HERDR_BIN" "$@"; }
 
 # herdr_socket — best-effort path of the current session's API socket.
+# Precedence: explicit HERDR_SOCKET_PATH, then the named session's socket
+# (plugin children always carry HERDR_SESSION; the default session's socket lives
+# at the legacy primary path), then the primary path.
 herdr_socket() {
   if [ -n "${HERDR_SOCKET_PATH:-}" ]; then printf '%s\n' "$HERDR_SOCKET_PATH"; return 0; fi
-  local f="$HOME/.config/herdr/herdr.sock"
-  [ -S "$f" ] || f="$HOME/.config/herdr/sessions/${HERDR_SESSION:-default}/herdr.sock"
+  local f
+  if [ -n "${HERDR_SESSION:-}" ] && [ "${HERDR_SESSION}" != "default" ]; then
+    f="$HOME/.config/herdr/sessions/$HERDR_SESSION/herdr.sock"
+    if [ -S "$f" ]; then printf '%s\n' "$f"; return 0; fi
+  fi
+  f="$HOME/.config/herdr/herdr.sock"
   [ -S "$f" ] || return 1
   printf '%s\n' "$f"
 }

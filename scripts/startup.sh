@@ -26,4 +26,17 @@ if flock -n "$LOCK" true 2>/dev/null; then
   disown 2>/dev/null || true
 fi
 
+# 3) Terminal-conversion subscriber (node; per-session). Push-based via the
+# socket events.subscribe API — the manifest [[events]] whitelist (herdr 0.9.3)
+# has no tab/pane lifecycle names. `flock -n` WRAPS the process: the lock is held
+# for node's lifetime, so repeated startups never duplicate the subscriber.
+# Requires node; without it conversion simply stays off.
+if command -v node >/dev/null 2>&1; then
+  setsid flock -n "$SESSION_DIR/subscriber.lock" \
+    node "$SCRIPT_DIR/events-subscribe.js" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+else
+  log "startup: node not found; terminal auto-conversion disabled"
+fi
+
 exit 0

@@ -64,7 +64,7 @@ docs/01..04-*.md       research + design background
 ## Testing
 
 ```bash
-bash -n scripts/*.sh && bash test/run-tests.sh   # expect: 53 passed, 0 failed
+bash -n scripts/*.sh && bash test/run-tests.sh   # expect: 61 passed, 0 failed
 ```
 
 For live tests (herdr smoke, docker/podman end-to-end, engine matrix, lifecycle),

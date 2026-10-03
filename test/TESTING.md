@@ -32,7 +32,7 @@ Expected: `SYNTAX-OK`.
 bash test/run-tests.sh
 ```
 
-Expected output ends with **`53 passed, 0 failed`** and exit code 0.
+Expected output ends with **`61 passed, 0 failed`** and exit code 0.
 
 What it covers, via the stubs in `test/mock/bin/` (fake docker, podman, devcontainer,
 herdr, socket-API):
@@ -276,4 +276,4 @@ hermeticity fix, `new_scenario` in `test/run-tests.sh` sanitizes every scenario:
 
 If you add scenarios, inherit this sanitation rather than setting PATH/env by hand;
 use `path_scrub <cmd>` when a scenario needs a binary to be absent. Expected suite
-result on every machine: `53 passed, 0 failed`.
+result on every machine: `61 passed, 0 failed`.
