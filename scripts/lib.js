@@ -324,9 +324,10 @@ export function layoutTree(folder, kind) {
 // layoutApply — exactly one of workspaceId / tabId (api schema: XOR).
 export async function layoutApply({ workspaceId, tabId, tabLabel, root }) {
   if (!!workspaceId === !!tabId) throw new Error('layoutApply: exactly one of workspaceId/tabId');
-  const params = { tab_label: tabLabel ?? null, focus: false, root };
+  const params = { focus: false, root };
   if (workspaceId) params.workspace_id = workspaceId;   // exactly one id key,
   if (tabId) params.tab_id = tabId;                     // never both (0.9.3 contract)
+  if (tabLabel) params.tab_label = tabLabel;             // null => keep herdr default naming
   const r = await apiRequest('layout.apply', params);
   if (!r.ok) {
     const msg = r.json?.error?.message || JSON.stringify(r.json) || 'failed';
@@ -373,4 +374,21 @@ export function paneOpenFallback(ws, entrypoint, envAssignments) {
   const r = hr(argsFor('tab', null));
   if (r.stdout.includes('plugin_pane_opened')) return 'tab';
   throw new Error(`plugin pane open failed: ${(r.stdout || r.stderr).slice(0, 300)}`);
+}
+
+// withinRestoreGrace — session restore replays tab.created for every restored
+// tab (observed on 0.9.3), which the conversion handler would multiply. The
+// subscriber ignores events during this window after its own start.
+export function withinRestoreGrace(startedAt, now = Date.now(), graceMs = 15000) {
+  return now - startedAt < graceMs;
+}
+
+// reportSpaceSubtext — display-only sidebar metadata under the space name.
+// herdr renders workspace metadata tokens dimmed in the sidebar; token name
+// 'subtext' (set SUBTEXT_TOKEN= in settings.env to change, empty to disable).
+export function reportSpaceSubtext(ws, cfg) {
+  const token = cfg.SUBTEXT_TOKEN === undefined ? 'subtext' : cfg.SUBTEXT_TOKEN;
+  if (!token) return;
+  hr(['workspace', 'report-metadata', ws, '--source', 'custom:devcontainer-spaces',
+    '--token', `${token}=devcontainer`]);
 }

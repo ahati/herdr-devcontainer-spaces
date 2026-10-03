@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import {
   log, warn, die, loadConfig, detectEngine, describeEngine, dcList, dc, probeAgents,
   layoutTree, layoutApply, state, tombstone, hr, hrJson, commandExists, SESSION_DIR,
+  reportSpaceSubtext, panesOf,
 } from './lib.js';
 
 const RESURRECT = process.argv.includes('--resurrect');
@@ -56,6 +57,16 @@ for (const row of dcList(engine.engine)) {
   const existing = state.containers()[folder];
   if (existing && hr(['workspace', 'get', existing.workspace_id]).ok) {
     log(`tracked: ${folder} -> ${existing.workspace_id}`);
+    // Repair: session restore brings tabs back without our pane labels — if the
+    // space lost its in-container shell entirely, re-apply the layout once.
+    const panes = panesOf(existing.workspace_id) || [];
+    const labels = ['shell', ...(existing.agents || [])];
+    if (!panes.some((p) => labels.includes(p.label || ''))) {
+      if (await layoutApply({ workspaceId: existing.workspace_id, tabLabel: cfg.TAB_LABEL, root: layoutTree(folder, '') })) {
+        log(`repaired devcontainer tab layout (${existing.workspace_id})`);
+      }
+    }
+    reportSpaceSubtext(existing.workspace_id, cfg);
     continue;
   }
 
@@ -73,7 +84,8 @@ for (const row of dcList(engine.engine)) {
   } else {
     warn('layout.apply unavailable; keeping default root pane — use the shell-here action');
   }
+  reportSpaceSubtext(ws, cfg);
   await state.upsert(folder, ws, row.id, kinds);
-  created++;
+  created++; 
 }
 log(`rescan done (created: ${created})`);

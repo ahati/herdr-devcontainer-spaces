@@ -25,7 +25,10 @@ if (type === 'tab_created') {
   const folder = state.folderForWs(ws);
   if (!folder) process.exit(0);                       // not a managed space
   if (tabHasOurPane(tab.tab_id, ws)) process.exit(0); // already ours — no loops
-  if (await layoutApply({ tabId: tab.tab_id, tabLabel: process.env.TAB_LABEL || 'devcontainer', root: layoutTree(folder, '') })) {
+  // Keep whatever name the new-tab popup gave the tab; only fall back to
+  // TAB_LABEL when it is unnamed. null lets herdr keep its default naming.
+  const label = (tab.label && tab.label.trim()) || null;
+  if (await layoutApply({ tabId: tab.tab_id, tabLabel: label, root: layoutTree(folder, '') })) {
     log(`tab ${tab.tab_id}: converted to devcontainer shell (${folder})`);
   }
 } else if (type === 'pane_created') {

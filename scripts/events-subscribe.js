@@ -10,7 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { socketPath, SESSION_DIR } from './lib.js';
+import { socketPath, SESSION_DIR, withinRestoreGrace } from './lib.js';
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HANDLER = path.join(SCRIPTS_DIR, 'on-terminal-created.js');
@@ -31,9 +31,16 @@ process.on('SIGTERM', () => process.exit(0));
 
 function log(msg) { process.stderr.write(`[devcontainer-spaces] subscriber: ${msg}\n`); }
 
+const START = Date.now();
+const GRACE_MS = Number(process.env.RESTORE_GRACE_MS || 15000);
+
 function dispatch(msg) {
   const type = String(msg.event || msg.type || msg?.data?.type || '').replace(/\./g, '_');
   if (type !== 'tab_created' && type !== 'pane_created') return;
+  if (withinRestoreGrace(START, Date.now(), GRACE_MS)) {
+    log(`ignoring ${type} during restore grace (${GRACE_MS}ms)`);
+    return;
+  }
   const payload = JSON.stringify({ event: type, data: msg.data || msg });
   const child = spawn(process.execPath, [HANDLER], {
     env: { ...process.env, HERDR_PLUGIN_EVENT: type, HERDR_PLUGIN_EVENT_JSON: payload },

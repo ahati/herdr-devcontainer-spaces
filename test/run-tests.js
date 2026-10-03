@@ -281,7 +281,15 @@ test('terminal conversion guards (tab/pane events)', { timeout: T.test }, () => 
 
   seed([{ pane_id: `${ws}:p5`, workspace_id: ws, tab_id: `${ws}:t9`, label: '' }]);
   ev({ event: 'tab_created', data: { type: 'tab_created', tab: { tab_id: `${ws}:t9`, workspace_id: ws, label: '' } } });
-  assert.ok(lastLayout().line.includes(`"tab_id":"${ws}:t9"`));
+  let layout = lastLayout().line;
+  assert.ok(layout.includes(`"tab_id":"${ws}:t9"`), layout);
+  assert.ok(!layout.includes('"tab_label"'), 'unnamed tab keeps herdr default naming');
+
+  // popup-named tab keeps its name through conversion
+  seed([{ pane_id: `${ws}:p6`, workspace_id: ws, tab_id: `${ws}:tA`, label: '' }]);
+  ev({ event: 'tab_created', data: { type: 'tab_created', tab: { tab_id: `${ws}:tA`, workspace_id: ws, label: 'my-work' } } });
+  layout = lastLayout().line;
+  assert.ok(layout.includes('"tab_label":"my-work"'), layout);
 
   const layouts = () => calls().split('\n').filter((l) => l.startsWith('LAYOUT ')).length;
   const n = layouts();
@@ -346,6 +354,29 @@ test('presence markers: pi detected without manifest match; bare prompt not', { 
   assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true');
 });
 
+test('restore grace + space subtext + repair', { timeout: T.test }, () => {
+  scenario('restore-grace');
+  const g = nodeLib(`console.log(lib.withinRestoreGrace(Number(process.env.S), Number(process.env.E), 15000))`, { S: '1000', E: '14000' });
+  assert.equal(g.stdout.trim(), 'true', 'within grace window');
+  const g2 = nodeLib(`console.log(lib.withinRestoreGrace(Number(process.env.S), Number(process.env.E), 15000))`, { S: '1000', E: '20000' });
+  assert.equal(g2.stdout.trim(), 'false', 'past grace window');
+
+  // subtext reported on discover (metadata call recorded by mock herdr)
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  run('discover.js');
+  assert.ok(calls().includes('workspace.report-metadata'), 'subtext metadata reported');
+  assert.ok(calls().includes('--token subtext=devcontainer'));
+
+  // repair: tracked space whose panes lost our labels gets its layout back
+  const ws = Object.values(stateJson())[0].workspace_id;
+  fs.writeFileSync(SC.env.MOCK_PANES, JSON.stringify({ result: { panes: [
+    { pane_id: `${ws}:p1`, workspace_id: ws, tab_id: `${ws}:t1`, label: '' }] } }));
+  const layouts0 = calls().split('\n').filter((l) => l.startsWith('LAYOUT ')).length;
+  const r = run('discover.js');
+  assert.equal(calls().split('\n').filter((l) => l.startsWith('LAYOUT ')).length, layouts0 + 1, 'repaired layout re-applied');
+  assert.ok(r.stderr.includes('repaired devcontainer tab layout'));
+});
+
 test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () => {
   scenario('watcher-basic');
   engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
@@ -380,3 +411,4 @@ test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () =
   w.kill('SIGTERM');
   await new Promise((r) => w.on('exit', r));
 });
+
