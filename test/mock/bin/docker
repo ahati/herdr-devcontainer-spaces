@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# mock docker — driven by $MOCK_ENGINES json. Serves only in mode docker-rootful.
+set -u
+[ -f "${MOCK_ENGINES:-/nonexistent}" ] || exit 1
+mode=$(jq -r '.mode' "$MOCK_ENGINES" 2>/dev/null)
+[ "$mode" = "docker-rootful" ] || exit 1
+
+tmpl="${@: -2:1}"; id="${@: -1}"   # for `inspect -f '<tmpl>' <id>`
+
+case "$1" in
+  version) exit 0 ;;
+  info)
+    case "$*" in
+      *OperatingSystem*) echo "Ubuntu 24.04" ;;
+      *ServerVersion*)   echo "24.0.7" ;;
+      *) echo "{}" ;;
+    esac ;;
+  context) echo "default" ;;
+  ps)      jq -r '.containers[].id' "$MOCK_ENGINES" ;;
+  inspect)
+    row=$(jq -r --arg id "$id" '.containers[] | select(.id==$id)' "$MOCK_ENGINES")
+    case "$tmpl" in
+      *State.Status*)  printf '%s\n' "$row" | jq -r '.state' ;;
+      *local_folder*)  printf '%s\n' "$row" | jq -r '.folder' ;;
+      *config_file*)   printf '%s\n' "$row" | jq -r '.config' ;;
+      *) echo "{}" ;;
+    esac ;;
+  *) exit 0 ;;
+esac

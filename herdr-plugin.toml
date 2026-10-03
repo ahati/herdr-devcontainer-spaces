@@ -1,0 +1,56 @@
+# Devcontainer Spaces for Herdr — discover devcontainers, create Herdr spaces with
+# in-container shells, and surface in-container coding agents as first-class agents.
+id = "devcontainer-spaces"
+name = "Devcontainer Spaces"
+version = "0.1.0"
+min_herdr_version = "0.9.0"   # verified against 0.9.3 (layout.apply, pane.report_agent, agent explain --file)
+description = "Detect devcontainers (docker/podman), create spaces with in-container shells, and make agents started inside those containers show up as Herdr agents"
+platforms = ["linux", "macos"]
+
+# After session restore: rediscover devcontainers, repair spaces, restart the watcher.
+[[startup]]
+command = ["bash", "scripts/startup.sh"]
+
+[[actions]]
+id = "rescan"
+title = "Devcontainers: rescan and create spaces"
+contexts = ["workspace"]
+command = ["bash", "scripts/discover.sh"]
+
+# Action invoked with an argument to clear tombstones (bind to a key or run via
+# `herdr plugin action invoke devcontainer-spaces.resurrect`).
+[[actions]]
+id = "resurrect"
+title = "Devcontainers: rescan (re-create closed spaces)"
+contexts = ["workspace"]
+command = ["bash", "scripts/discover.sh", "--resurrect"]
+
+[[actions]]
+id = "shell-here"
+title = "Devcontainers: open in-container shell here"
+contexts = ["workspace"]
+command = ["bash", "scripts/open-shell.sh"]
+
+[[actions]]
+id = "agent-here"
+title = "Devcontainers: start agent in this space"
+contexts = ["workspace"]
+command = ["bash", "scripts/start-agent.sh"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bash", "scripts/on-workspace-closed.sh"]
+
+# Fallback pane entrypoints (used when layout.apply is unavailable, or via the
+# shell-here / agent-here actions).
+[[panes]]
+id = "dc-shell"
+title = "devcontainer shell"
+placement = "split"
+command = ["bash", "scripts/pane-shell.sh"]
+
+[[panes]]
+id = "dc-agent"
+title = "devcontainer agent"
+placement = "split"
+command = ["bash", "scripts/pane-agent.sh"]

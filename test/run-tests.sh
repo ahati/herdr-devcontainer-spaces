@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# test/run-tests.sh — unit + integration tests with mock engines and a mock herdr.
+# No docker, podman, devcontainer CLI, or herdr server required.
+# Full test levels (incl. live tests for another machine): see test/TESTING.md.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$HERE")"
+
+pass=0 fail=0
+BASE_PATH="$PATH"   # pristine PATH; scenarios must not accumulate stub dirs
+ok()   { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
+fail_(){ fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
+check(){ if eval "$2"; then ok "$1"; else fail_ "$1 — [$2]"; fi }
+
+new_scenario() {  # $1 = name; sets up a fresh mock env; echoes the mock dir
+  local name="$1"
+  local d; d="$(mktemp -d "/tmp/dcsp-$name.XXXXXX")"
+  mkdir -p "$d/bin" "$d/home/project-a/.devcontainer" "$d/state" "$d/stubs" "$d/screens"
+  cp "$HERE"/mock/bin/* "$d/stubs/"; chmod +x "$d/stubs"/*
+  export PATH="$d/stubs:$BASE_PATH"        # no accumulation across scenarios
+  export HERDR_BIN_PATH="$d/stubs/herdr"   # pin the mock herdr (ambient env may set it!)
+  export MOCK="$d"
+  export HERDR_PLUGIN_STATE_DIR="$d/state"
+  export HERDR_PLUGIN_CONFIG_DIR="$d/config"; mkdir -p "$d/config"
+  export HERDR_API_STUB="$d/stubs/herdr-api-stub"
+  export MOCK_ENGINES="$d/engines.json"
+  export MOCK_PANES="$d/panes.json"
+  export MOCK_CALLS="$d/calls.log"; : > "$MOCK_CALLS"
+  SCENARIO_DIR="$d"
+}
+
+# ---------------------------------------------------------------- scenarios --
+echo "# engine detection"
+
+new_scenario engine-docker-rootful; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<'EOF'
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"/tmp/ignored/project-a","config":"/tmp/ignored/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+source "$ROOT/scripts/lib.sh"
+load_config; state_init
+engine_detect || true
+check "docker engine detected"          '[ "$ENGINE" = docker ]'
+check "docker rootful mode"             '[ "$ROOTLESS" = 0 ]'
+check "describe mentions rootful"       'engine_describe | grep -q rootful'
+
+new_scenario engine-podman-rootless; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<'EOF'
+{ "mode": "podman-rootless", "containers": [] }
+EOF
+source "$ROOT/scripts/lib.sh"
+load_config; engine_detect || true
+check "podman engine detected"          '[ "$ENGINE" = podman ]'
+check "podman rootless detected"        '[ "$ROOTLESS" = 1 ]'
+
+new_scenario engine-none; d=$SCENARIO_DIR
+printf '{"mode":"none","containers":[]}' > "$MOCK_ENGINES"
+source "$ROOT/scripts/lib.sh"; load_config
+check "engine_detect fails gracefully"  '! engine_detect'
+
+# ---------------------------------------------------------------- dc_list ----
+echo "# dc_list portability"
+
+new_scenario dclist; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"},
+                  {"id":"c2","state":"exited","folder":"/srv/other-user/proj","config":"/srv/other-user/proj/.devcontainer/devcontainer.json"} ] }
+EOF
+source "$ROOT/scripts/lib.sh"; load_config; state_init; engine_detect || true
+rows=$(dc_list)
+check "dc_list returns both containers"  '[ "$(printf "%s\n" "$rows" | grep -c .)" = 2 ]'
+check "dc_list fields (running)"         'printf "%s\n" "$rows" | grep -q "^c1.running."'
+check "dc_list fields (folder)"          'printf "%s\n" "$rows" | grep -q "project-a"'
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "podman-rootless",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+ENGINE=auto                # re-detect from scratch (previous detect pinned docker)
+engine_detect || true
+rows_podman=$(dc_list)
+check "dc_list identical under podman"   '[ "$(printf "%s" "$rows_podman" | grep -c "^c1.running.")" = 1 ]'
+
+# ---------------------------------------------------------------- discover ---
+echo "# discover.sh end-to-end (docker, one running container, claude+codex present)"
+
+new_scenario discover-basic; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+printf 'claude\ncodex\n' > "$d/agents-present"
+export HOME="$d/home"
+rc=0; bash "$ROOT/scripts/discover.sh" >"$d/discover.out" 2>&1 || rc=$?
+check "discover exits 0"                 "[ $rc -eq 0 ] || tail -5 '$d/discover.out'"
+check "workspace created (mock call)"    'grep -q "workspace.create" "$MOCK_CALLS"'
+check "space label is directory name only" 'grep -q "workspace.create .*label=project-a " "$MOCK_CALLS"'
+check "layout.apply sent"                'grep -q "layout.apply" "$MOCK_CALLS"'
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/containers.json")
+check "mapping saved"                    '[ -n "$ws" ]'
+check "agents probed claude+codex"       'jq -e --arg f "'"$d"'/home/project-a" ".[\$f].agents == [\"claude\",\"codex\"]" "'"$HERDR_PLUGIN_STATE_DIR"'/containers.json" >/dev/null'
+tree=$(grep "^LAYOUT " "$MOCK_CALLS" | tail -1 | cut -d" " -f2-)
+check "layout tree valid JSON"           'printf "%s" "$tree" | jq -e ".root.type == \"split\"" >/dev/null'
+check "tree: shell pane uses devcontainer exec" 'printf "%s" "$tree" | jq -e ".root.first.command[0] == \"devcontainer\"" >/dev/null'
+check "tree: agent pane HERDR_AGENT hint" 'printf "%s" "$tree" | jq -e ".root.second.env.HERDR_AGENT == \"claude\"" >/dev/null'
+
+rc=0; bash "$ROOT/scripts/discover.sh" >"$d/discover2.out" 2>&1 || rc=$?
+check "second run is idempotent"         '[ "$(grep -c "workspace.create" "$MOCK_CALLS")" -eq 1 ]'
+
+new_scenario discover-outside-home; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c9","state":"running","folder":"/srv/other/proj","config":"/srv/other/proj/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >"$d/out" 2>&1 || true
+check "outside-\$HOME skipped"           'grep -q "outside \$HOME" "$d/out"'
+check "no workspace created"             '! grep -q "workspace.create" "$MOCK_CALLS"'
+
+new_scenario discover-stopped; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c3","state":"exited","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >"$d/out" 2>&1 || true
+check "stopped container skipped by default" 'grep -q "AUTO_START_CONTAINERS" "$d/out"'
+printf 'AUTO_START_CONTAINERS=1\n' > "$HERDR_PLUGIN_CONFIG_DIR/settings.env"
+bash "$ROOT/scripts/discover.sh" >"$d/out2" 2>&1 || true
+check "devcontainer up invoked when enabled" 'grep -q "devcontainer.up" "$MOCK_CALLS"'
+
+new_scenario discover-tombstone; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"; source "$ROOT/scripts/lib.sh"; load_config; state_init
+: > "$(tombstone_path "$d/home/project-a")"
+bash "$ROOT/scripts/discover.sh" >"$d/out" 2>&1 || true
+check "tombstoned folder skipped"        'grep -q "tombstoned" "$d/out"'
+bash "$ROOT/scripts/discover.sh" --resurrect >"$d/out2" 2>&1 || true
+check "resurrect clears tombstone"       'grep -q "resurrecting" "$d/out2"'
+
+new_scenario discover-podman-shim; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "podman-rootless",
+  "containers": [ {"id":"p1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+rm -f "$d/stubs/docker"                  # simulate a podman-only machine
+printf 'claude\n' > "$d/agents-present"
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >"$d/out" 2>&1 || true
+check "podman-only discovery works"      'grep -q "created workspace" "$d/out"'
+check "scoped docker->podman shim generated" '[ -x "$HERDR_PLUGIN_STATE_DIR/shim/docker" ]'
+
+# ---------------------------------------------------------------- watcher ----
+echo "# watcher.sh"
+
+new_scenario watcher-basic; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+printf 'claude\n' > "$d/agents-present"
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/containers.json")
+
+# Two panes in the managed workspace:
+#   p1 "shell"  — generic shell where the user started claude from the prompt
+#   p2 "claude" — dedicated agent pane (HERDR_AGENT hint); watcher must skip it
+cat > "$MOCK_PANES" <<EOF
+{"result":{"panes":[
+  {"pane_id":"$ws:p1","workspace_id":"$ws","label":"shell"},
+  {"pane_id":"$ws:p2","workspace_id":"$ws","label":"claude"}
+]}}
+EOF
+printf 'claude ui on screen\n' > "$d/screens/$ws:p1.txt"
+printf 'claude ui on screen\n' > "$d/screens/$ws:p2.txt"
+cat > "$d/rules.json" <<'EOF'
+{ "claude": { "marker": "claude ui on screen", "state": "working" } }
+EOF
+export MOCK_RULES="$d/rules.json"
+
+POLL_SECS=0.3 bash "$ROOT/scripts/watcher.sh" >"$d/watcher.log" 2>&1 &
+wpid=$!
+sleep 1.2
+check "watcher reports in-shell agent"   'grep -q "agent=claude state=working" "$d/watcher.log"'
+check "report targeted the shell pane"   'grep -q "pane '"$ws"':p1: agent=claude" "$d/watcher.log"'
+check "dedicated agent pane skipped"     '[ "$(grep -c "pane '"$ws"':p2:" "$d/watcher.log")" -eq 0 ]'
+
+# agent exits -> screen back to a bare prompt (explain returns fallback idle) -> release
+printf 'just a shell prompt\n' > "$d/screens/$ws:p1.txt"
+cat > "$d/rules.json" <<'EOF'
+{ "claude": { "marker": "claude ui on screen", "state": "fallback-idle" } }
+EOF
+sleep 1.2
+check "watcher releases on agent exit"   'grep -q "released claude" "$d/watcher.log"'
+kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+check "report-agent call recorded"       'grep -q "pane.report-agent" "$MOCK_CALLS"'
+check "release-agent call recorded"      'grep -q "pane.release-agent" "$MOCK_CALLS"'
+
+# ---------------------------------------------------------------- summary ----
+echo
+printf '%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# mock devcontainer CLI — records invocations; fakes `exec` probes and `up`.
+set -u
+MOCK="${MOCK:-/tmp}"
+CALLS="${MOCK_CALLS:-$MOCK/calls.log}"
+
+note() { printf '%s\n' "$*" >> "$CALLS"; }
+
+case "$1" in
+  exec)
+    # devcontainer exec --workspace-folder <F> sh -lc 'command -v <kind>'
+    kind=""
+    for a in "$@"; do
+      case "$a" in
+        "command -v "*) kind="${a#command -v }" ;;
+      esac
+    done
+    if [ -n "$kind" ]; then
+      if [ -f "$MOCK/agents-present" ] && grep -qx "$kind" "$MOCK/agents-present"; then
+        echo "/usr/local/bin/$kind"; exit 0
+      fi
+      exit 1
+    fi
+    note "devcontainer.exec $*"
+    exit 0 ;;
+  up)
+    note "devcontainer.up $*"
+    exit 0 ;;
+  --version)
+    echo "0.75.0-mock" ;;
+  *)
+    note "devcontainer.$1 $*"
+    exit 0 ;;
+esac

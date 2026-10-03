@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# mock herdr CLI — stateful enough for the plugin scripts under test.
+set -u
+MOCK="${MOCK:-/tmp}"
+CALLS="${MOCK_CALLS:-$MOCK/calls.log}"
+WSLIST="$MOCK/ws.list"
+touch "$WSLIST" "$CALLS"
+
+note() { printf '%s\n' "$*" >> "$CALLS"; }
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  workspace)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      create)
+        cwd=""; label=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --cwd) cwd="$2"; shift 2 ;;
+            --label) label="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        n=$(($(wc -l < "$WSLIST") + 1))
+        ws="w$n"; tab="$ws:t1"; pane="$ws:p1"
+        echo "$ws" >> "$WSLIST"
+        note "workspace.create cwd=$cwd label=$label ws=$ws"
+        jq -n --arg ws "$ws" --arg tab "$tab" --arg pane "$pane" \
+          '{result:{workspace:{workspace_id:$ws},tab:{tab_id:$tab},root_pane:{pane_id:$pane}}}'
+        ;;
+      get)
+        id="${1:-}"
+        grep -qx "$id" "$WSLIST" && exit 0
+        exit 1 ;;
+      list)
+        jq -n '[].ws' 2>/dev/null || printf '[]\n' ;;
+      *) note "workspace.$sub $*"; exit 0 ;;
+    esac ;;
+  pane)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      list)
+        [ -f "${MOCK_PANES:-/nonexistent}" ] && cat "$MOCK_PANES" || printf '{"result":{"panes":[]}}\n' ;;
+      read)
+        pane=""; i=0
+        for a in "$@"; do
+          case "$a" in --*) break ;; *) [ "$i" -eq 0 ] && pane="$a" ;; esac
+          i=$((i+1))
+        done
+        f="$MOCK/screens/$pane.txt"
+        [ -f "$f" ] && cat "$f" || exit 1 ;;
+      report-agent|release-agent)
+        note "pane.$sub $*"
+        exit 0 ;;
+      *) note "pane.$sub $*"; exit 0 ;;
+    esac ;;
+  agent)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      explain)
+        file=""; kind=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --file) file="$2"; shift 2 ;;
+            --agent) kind="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        marker=$(jq -r --arg k "$kind" '.[$k].marker // ""' "${MOCK_RULES:-/dev/null}" 2>/dev/null)
+        state=$(jq -r --arg k "$kind" '.[$k].state // "unknown"' "${MOCK_RULES:-/dev/null}" 2>/dev/null)
+        if [ -n "$marker" ] && [ -f "$file" ] && grep -q "$marker" "$file"; then
+          if [ "$state" = "fallback-idle" ]; then
+            jq -n '{state:"idle", idle_fallback_reason:"test-fallback"}'
+          else
+            jq -n --arg s "$state" '{state:$s}'
+          fi
+        else
+          jq -n '{state:"unknown"}'
+        fi ;;
+      *) note "agent.$sub $*"; exit 0 ;;
+    esac ;;
+  plugin)
+    note "plugin $*"
+    exit 0 ;;
+  ping|status)
+    exit 0 ;;
+  *)
+    note "herdr.$cmd $*"
+    exit 0 ;;
+esac

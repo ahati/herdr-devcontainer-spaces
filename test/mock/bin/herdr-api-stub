@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# mock herdr socket API (HERDR_API_STUB seam in lib.sh api_request).
+# Usage: herdr-api-stub <method> <params-json>
+set -u
+MOCK="${MOCK:-/tmp}"
+CALLS="${MOCK_CALLS:-$MOCK/calls.log}"
+
+method="${1:-}"; params="${2:-}"
+[ -n "$params" ] || params='{}'
+
+# Validate params are JSON — a malformed tree must fail loudly in tests.
+compact=$(printf '%s' "$params" | jq -c . 2>/dev/null) || { echo "invalid params json" >&2; exit 2; }
+
+printf '%s %s\n' "$method" "$compact" >> "$CALLS"
+if [ "$method" = "layout.apply" ]; then
+  printf 'LAYOUT %s\n' "$compact" >> "$CALLS"
+fi
+exit 0
