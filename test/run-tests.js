@@ -446,6 +446,13 @@ test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () =
   await wait(1300);
   assert.ok(wl().includes('released claude'));
   assert.ok(/release-agent[^\n]*--seq/.test(calls()), 'release carries --seq');
+  // re-launch in the same terminal: seq must CONTINUE (report > release seq),
+  // else herdr drops the report and the agent never reappears
+  rules({ claude: { marker: 'claude ui on screen', state: 'working' } });
+  screen('p1', 'claude ui on screen\n');
+  await wait(1300);
+  assert.ok(/report-agent[^\n]*--seq 3(?:\s|$)/.test(calls()), 're-launch reports with seq 3');
+  assert.ok((wl().match(/agent=claude state=working/g) || []).length >= 2, 're-detected after re-launch');
   w.kill('SIGTERM');
   await new Promise((r) => w.on('exit', r));
 });

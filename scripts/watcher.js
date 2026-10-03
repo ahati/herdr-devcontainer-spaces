@@ -159,7 +159,10 @@ async function tick() {
       } else if (prev) {
         const seq = (panes[pane]?.seq || 0) + 1;
         hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev, '--seq', String(seq)]);
-        await state.setPanesSafe((pp) => { delete pp[pane]; return pp; });
+        // Retain the seq counter: herdr ignores reports with seq <= the last
+        // accepted one per (pane, source) — resetting it on release made agent
+        // re-launches in the same terminal invisible (seq restarted at 1).
+        await state.setPanesSafe((pp) => { pp[pane] = { agent: null, state: null, seq }; return pp; });
         log(`pane ${pane}: released ${prev} (no agent on screen)`);
       }
     }
