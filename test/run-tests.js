@@ -136,8 +136,9 @@ test('discover end-to-end (AUTO_START_AGENTS=1)', { timeout: T.test }, () => {
   assert.equal(tree.root.type, 'split');
   assert.equal(tree.root.first.command[0], 'devcontainer');
   assert.equal(tree.root.second.env.HERDR_AGENT, 'claude');
-  assert.ok(line.includes('"workspace_id"'));       // 0.9.3 contract: XOR, no tab_id
-  assert.ok(!line.includes('"tab_id"'));
+  assert.ok(line.includes('"tab_id"'), 'creation replaces the default root tab');
+  assert.ok(!line.includes('"workspace_id"'), 'exactly one id key (XOR contract)');
+  assert.ok(!line.includes('"tab_label"'), 'keep herdr default numbered naming');
   const n = (calls().match(/workspace\.create/g) || []).length;
   assert.equal(run('discover.js').status, 0);       // idempotent
   assert.equal((calls().match(/workspace\.create/g) || []).length, n);
@@ -354,6 +355,11 @@ test('presence markers: title + multi-hit content; exit banner does not match', 
   assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner + cleared title');
   assert.equal(hit(bare, '@abc123: /bin/bash'), 'false', 'bare prompt');
   assert.equal(hit('hati@monster: ~/x', 'hati@monster: ~/x'), 'false', 'host prompt');
+  // claude / codex / opencode: multi-hit content defaults
+  assert.equal(hit('Welcome to Claude Code\n╭──────────╮\n claude', '@c: /bin/bash', 'claude'), 'true', 'claude idle UI');
+  assert.equal(hit('some log line', '@c: /bin/bash', 'claude'), 'false', 'claude: single stray string');
+  assert.equal(hit('OpenAI Codex v0.9\nesc to interrupt', '@c: /bin/bash', 'codex'), 'true', 'codex idle UI');
+  assert.equal(hit('opencode\nCtrl+C to exit', '@c: /bin/bash', 'opencode'), 'true', 'opencode idle UI');
   assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', '', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true', 'user override');
 });
 

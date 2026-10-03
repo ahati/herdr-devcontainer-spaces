@@ -62,7 +62,7 @@ for (const row of dcList(engine.engine)) {
     const panes = panesOf(existing.workspace_id) || [];
     const labels = ['shell', ...(existing.agents || [])];
     if (!panes.some((p) => labels.includes(p.label || ''))) {
-      if (await layoutApply({ workspaceId: existing.workspace_id, tabLabel: cfg.TAB_LABEL, root: layoutTree(folder, '') })) {
+      if (await layoutApply({ workspaceId: existing.workspace_id, tabLabel: null, root: layoutTree(folder, '') })) {
         log(`repaired devcontainer tab layout (${existing.workspace_id})`);
       }
     }
@@ -76,10 +76,14 @@ for (const row of dcList(engine.engine)) {
 
   const made = hrJson(['workspace', 'create', '--cwd', folder, '--label', path.basename(folder), '--no-focus']);
   const ws = made.json?.result?.workspace?.workspace_id;
+  const rootTab = made.json?.result?.tab?.tab_id || null;
   if (!made.ok || !ws) { warn(`workspace create failed for ${folder}`); continue; }
   log(`created workspace ${ws} (${path.basename(folder)})`);
 
-  if (await layoutApply({ workspaceId: ws, tabLabel: cfg.TAB_LABEL, root: layoutTree(folder, kind) })) {
+    const applied = rootTab
+    ? await layoutApply({ tabId: rootTab, tabLabel: null, root: layoutTree(folder, kind) })   // replace the default root tab ("1")
+    : await layoutApply({ workspaceId: ws, tabLabel: null, root: layoutTree(folder, kind) });
+  if (applied) {
     log(`applied devcontainer tab layout (${ws})`);
   } else {
     warn('layout.apply unavailable; keeping default root pane — use the shell-here action');

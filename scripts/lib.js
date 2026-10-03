@@ -266,11 +266,20 @@ export function dc(engine, args, opts = {}) {
 }
 
 export function probeAgents(engine, folder, kinds) {
+  // Probe via both a login shell (~/.profile) and an interactive bash
+  // (~/.bashrc — where nvm / ~/.local/bin paths usually live); a single
+  // `sh -lc` misses agents installed via bashrc-only PATH setup (observed:
+  // claude/codex/opencode unreported while agy/pi were found).
+  const shells = [['sh', '-lc'], ['bash', '-ic']];
   const present = [];
   for (const kind of kinds) {
     const clean = kind.replace(/[^a-z0-9_-]/g, '');
-    const r = dc(engine, ['exec', '--workspace-folder', folder, 'sh', '-lc', `command -v ${clean}`], { stdio: 'ignore' });
-    if (r.status === 0) present.push(kind);
+    let found = false;
+    for (const sh of shells) {
+      const r = dc(engine, ['exec', '--workspace-folder', folder, ...sh, `command -v ${clean}`], { stdio: 'ignore' });
+      if (r.status === 0) { found = true; break; }
+    }
+    if (found) present.push(kind);
   }
   return present;
 }
@@ -291,6 +300,12 @@ const PRESENCE_MARKERS = {
     title: [/^π - /],        // title-only: content viewport stays contaminated
     content: [],             // after exit (banner remains in scrollback)
   },
+  // Best-effort defaults from the agents' documented idle UIs; override or add
+  // via settings.env MARKERS_<kind>=<regex> (any-hit semantics). Multi-hit
+  // content thresholds avoid matching a single quoted string in scrollback.
+  claude: { title: [], content: [/Welcome to Claude Code/, /Claude Code/, /esc to (?:interrupt|clear)/, /╭[─━]{4,}/], minContent: 2 },
+  codex:   { title: [], content: [/OpenAI Codex/, /codex v?\d/i, /esc to interrupt/, /⠋|⠙|⠹|⠸/], minContent: 2 },
+  opencode: { title: [], content: [/opencode/i, /new (?:session|thread)/i, /Ctrl\+C/i, /▌/], minContent: 2 },
 };
 
 export function compileMarkers(cfg) {
