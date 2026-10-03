@@ -388,6 +388,32 @@ space_create() {
   printf '%s\n' "$ws"
 }
 
+# layout_apply_tab <tab_id> <label> <root-tree-json> — replace an EXISTING tab's
+# tree in place (api schema: tab_id XOR workspace_id; tab mode closes the old tab
+# after opening the replacement). Used by the tab_created hook.
+layout_apply_tab() {
+  local tab="$1" label="$2" tree="$3" payload resp
+  payload=$(jq -n --arg tab "$tab" --arg l "$label" --argjson root "$tree" \
+    '{tab_id:$tab, tab_label:$l, focus:false, root:$root}')
+  if ! resp=$(api_request layout.apply "$payload"); then
+    [ -n "$resp" ] && log "layout.apply: $(printf '%s' "$resp" | jq -r '.error.message // "failed"' 2>/dev/null)"
+    return 1
+  fi
+  return 0
+}
+
+# state_folder_for_ws <workspace_id> — managed folder for a workspace, or empty.
+state_folder_for_ws() {
+  jq -r --arg ws "$1" 'to_entries[] | select(.value.workspace_id==$ws) | .key' \
+    "$STATE_FILE" 2>/dev/null | head -1
+}
+
+# state_agents_for_ws <workspace_id> — space-separated agent kinds for the workspace.
+state_agents_for_ws() {
+  jq -r --arg ws "$1" '[to_entries[] | select(.value.workspace_id==$ws) | .value.agents[]?] | join(" ")' \
+    "$STATE_FILE" 2>/dev/null
+}
+
 # state_upsert <folder> <workspace_id> <container_id> <agents-space-separated>
 state_upsert() {
   local folder="$1" ws="$2" cid="$3" agents="$4"

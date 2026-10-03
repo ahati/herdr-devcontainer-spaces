@@ -303,6 +303,62 @@ bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 &
 wait
 check "concurrent rescans create exactly one space" '[ "$(grep -c "workspace.create" "$MOCK_CALLS")" -eq 1 ]'
 
+# -------------------------------------- terminal conversion (tabs/splits) ---
+echo "# terminal conversion (tab_created / pane_created)"
+
+new_scenario terminal-conversion; d=$SCENARIO_DIR
+cat > "$MOCK_ENGINES" <<EOF
+{ "mode": "docker-rootful",
+  "containers": [ {"id":"c1","state":"running","folder":"$d/home/project-a","config":"$d/home/project-a/.devcontainer/devcontainer.json"} ] }
+EOF
+export HOME="$d/home"
+bash "$ROOT/scripts/discover.sh" >/dev/null 2>&1 || true
+ws=$(jq -r '."'"$d"'/home/project-a".workspace_id' "$HERDR_PLUGIN_STATE_DIR/sessions/mock-1/containers.json")
+unset HERDR_PLUGIN_CONTEXT_JSON HERDR_PANE_ID || true
+
+# 1) tab_created in a managed space with a native (unlabeled) pane -> replace
+cat > "$MOCK_PANES" <<EOF
+{"result":{"panes":[{"pane_id":"$ws:p5","workspace_id":"$ws","tab_id":"$ws:t9","label":""}]}}
+EOF
+export HERDR_PLUGIN_EVENT_JSON
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn --arg ws "$ws" '{event:"tab_created",data:{type:"tab_created",tab:{tab_id:"'"$ws"':t9",workspace_id:$ws,label:""}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "tab_created converts native tab to in-container tree" 'grep "^LAYOUT " "$MOCK_CALLS" | tail -1 | grep -q "\"tab_id\":\"'"$ws"':t9\""'
+
+# 2) loop guard: tab already carries a shell-labeled pane -> untouched
+before=$(grep -c "^LAYOUT " "$MOCK_CALLS")
+cat > "$MOCK_PANES" <<EOF
+{"result":{"panes":[{"pane_id":"$ws:p5","workspace_id":"$ws","tab_id":"$ws:t9","label":"shell"}]}}
+EOF
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn --arg ws "$ws" '{event:"tab_created",data:{type:"tab_created",tab:{tab_id:"'"$ws"':t9",workspace_id:$ws,label:"devcontainer"}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "already-converted tab is left alone (no loop)" '[ "$(grep -c "^LAYOUT " "$MOCK_CALLS")" -eq "$before" ]'
+
+# 3) unmanaged workspace -> untouched
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn '{event:"tab_created",data:{type:"tab_created",tab:{tab_id:"wX:t8",workspace_id:"wX",label:""}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "unmanaged workspace untouched" '[ "$(grep -c "^LAYOUT " "$MOCK_CALLS")" -eq "$before" ]'
+
+# 4) pane_created: split in a tab we manage (shell pane present), unlabeled -> exec
+cat > "$MOCK_PANES" <<EOF
+{"result":{"panes":[{"pane_id":"$ws:p1","workspace_id":"$ws","tab_id":"$ws:t2","label":"shell"},
+                     {"pane_id":"$ws:p2","workspace_id":"$ws","tab_id":"$ws:t2","label":""}]}}
+EOF
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn --arg ws "$ws" '{event:"pane_created",data:{type:"pane_created",pane:{pane_id:"'"$ws"':p2",workspace_id:$ws,tab_id:"'"$ws"':t2",label:""}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "split pane execs into the container" 'grep -q "pane.run '"$ws"':p2 exec devcontainer exec --workspace-folder" "$MOCK_CALLS"'
+
+# 5) labeled (plugin) pane -> not re-exec'd
+runs=$(grep -c "^pane\.run" "$MOCK_CALLS")
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn --arg ws "$ws" '{event:"pane_created",data:{type:"pane_created",pane:{pane_id:"'"$ws"':p1",workspace_id:$ws,tab_id:"'"$ws"':t2",label:"shell"}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "labeled plugin pane not re-exec'd" '[ "$(grep -c "^pane\.run" "$MOCK_CALLS")" -eq "$runs" ]'
+
+# 6) unlabeled pane in a native tab (no shell pane) -> left for the tab hook
+HERDR_PLUGIN_EVENT_JSON=$(jq -cn --arg ws "$ws" '{event:"pane_created",data:{type:"pane_created",pane:{pane_id:"'"$ws"':p7",workspace_id:$ws,tab_id:"'"$ws"':t9",label:""}}}')
+bash "$ROOT/scripts/on-terminal-created.sh" >/dev/null 2>&1
+check "root pane of a native tab left for the tab_created hook" '[ "$(grep -c "^pane\.run" "$MOCK_CALLS")" -eq "$runs" ]'
+
 # ---------------------------------------------------------------- watcher ----
 echo "# watcher.sh"
 

@@ -2,7 +2,7 @@
 # in-container shells, and surface in-container coding agents as first-class agents.
 id = "devcontainer-spaces"
 name = "Devcontainer Spaces"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"   # verified against 0.9.3 (layout.apply, pane.report_agent, agent explain --file)
 description = "Detect devcontainers (docker/podman), create spaces with in-container shells, and make agents started inside those containers show up as Herdr agents"
 platforms = ["linux", "macos"]
@@ -37,9 +37,45 @@ title = "Devcontainers: start agent in this space"
 contexts = ["workspace"]
 command = ["bash", "scripts/start-agent.sh"]
 
+# Shortcuts — ctrl+alt family is the documented safe space for plugin bindings
+# (herdr's prefix is ctrl+b; most prefix chords are taken by built-ins).
+[[keys.command]]
+key = "ctrl+alt+r"
+type = "plugin_action"
+command = "devcontainer-spaces.rescan"
+description = "Devcontainers: rescan and create spaces"
+
+[[keys.command]]
+key = "ctrl+alt+shift+r"
+type = "plugin_action"
+command = "devcontainer-spaces.resurrect"
+description = "Devcontainers: rescan (re-create closed spaces)"
+
+[[keys.command]]
+key = "ctrl+alt+h"
+type = "plugin_action"
+command = "devcontainer-spaces.shell-here"
+description = "Devcontainers: open in-container shell here"
+
+[[keys.command]]
+key = "ctrl+alt+g"
+type = "plugin_action"
+command = "devcontainer-spaces.agent-here"
+description = "Devcontainers: start agent in this space"
+
 [[events]]
 on = "workspace.closed"
 command = ["bash", "scripts/on-workspace-closed.sh"]
+
+# Keep every terminal of a managed space inside the container: new tabs are
+# replaced with an in-container shell tree; split panes exec into the container.
+[[events]]
+on = "tab_created"
+command = ["bash", "scripts/on-terminal-created.sh"]
+
+[[events]]
+on = "pane_created"
+command = ["bash", "scripts/on-terminal-created.sh"]
 
 # Fallback pane entrypoints (used when layout.apply is unavailable, or via the
 # shell-here / agent-here actions).
