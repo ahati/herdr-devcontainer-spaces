@@ -125,7 +125,8 @@ async function tick() {
         const panes = state.panes();
         const prev = panes[pane]?.agent;
         if (prev) {
-          hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev]);
+          const seq = (panes[pane]?.seq || 0) + 1;
+          hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev, '--seq', String(seq)]);
           await state.setPanesSafe((pp) => { delete pp[pane]; return pp; });
           log(`pane ${pane} gone; released ${prev}`);
         }
@@ -147,7 +148,7 @@ async function tick() {
       if (best) {
         if (best !== prev || bestState !== prevState) {
           if (prev && prev !== best) {
-            hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev]);
+            hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev, '--seq', String((panes[pane]?.seq || 0) + 1)]);
           }
           const seq = (panes[pane]?.seq || 0) + 1;
           if (hr(['pane', 'report-agent', pane, '--source', 'custom:devcontainer', '--agent', best, '--state', bestState, '--seq', String(seq)]).ok) {
@@ -157,7 +158,7 @@ async function tick() {
         }
       } else if (prev) {
         const seq = (panes[pane]?.seq || 0) + 1;
-        hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev]);
+        hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev, '--seq', String(seq)]);
         await state.setPanesSafe((pp) => { delete pp[pane]; return pp; });
         log(`pane ${pane}: released ${prev} (no agent on screen)`);
       }

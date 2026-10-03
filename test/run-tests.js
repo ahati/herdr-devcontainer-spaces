@@ -349,7 +349,7 @@ test('presence markers: title + multi-hit content; exit banner does not match', 
   const hit = (t, title, k = 'pi') => nodeLib(
     `console.log(lib.presenceMatch(process.env.K, process.env.T, process.env.TITLE, lib.compileMarkers({})))`,
     { T: t, TITLE: title, K: k }).stdout.trim();
-  assert.equal(hit(piRunning, 'π - hexagon-compiler'), 'true', 'running: pi title');
+  assert.equal(hit(piRunning, 'π - my-project'), 'true', 'running: pi title');
   assert.equal(hit(piRunning, '@abc123: /bin/bash'), 'false', 'banner in viewport + cleared title = agent gone (title-only for pi)');
   assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner + cleared title');
   assert.equal(hit(bare, '@abc123: /bin/bash'), 'false', 'bare prompt');
@@ -436,7 +436,7 @@ test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () =
   rules({ claude: { marker: 'claude ui on screen', state: 'fallback-idle' } });
   await wait(1300);
   assert.ok(wl().includes('released claude'));
-  assert.ok(calls().includes('pane.release-agent'));
+  assert.ok(/release-agent[^\n]*--seq/.test(calls()), 'release carries --seq');
   w.kill('SIGTERM');
   await new Promise((r) => w.on('exit', r));
 });
