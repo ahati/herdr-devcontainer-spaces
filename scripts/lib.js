@@ -278,18 +278,18 @@ export function probeAgents(engine, folder, kinds) {
 // ------------------------------------------------- agent presence markers ---
 // herdr's screen manifests decide the agent STATE, but some agents' idle screens
 // match no manifest rule (observed: pi 2026.10 on herdr 0.9.3). These markers are
-// the plugin's own presence signal. Two lessons baked in:
-//   * the pane TITLE is the cleanest live/dead signal (pi sets 'π - …' while
-//     running; the shell resets it on exit)
-//   * content markers must require MULTIPLE distinct hits — pi's exit banner
-//     itself prints '⬢ Antigravity-Mode (always)', which kept a single-hit match
-//     alive forever after the agent exited
-// Extend per agent via settings.env: MARKERS_pi='Antigravity|foo' (regex, any hit).
+// the plugin's own presence signal. Hard-won specifics:
+//   * the pane TITLE is the only reliable live/dead signal for agents that set
+//     one — pi sets 'π - …' while running and the shell resets it on exit. The
+//     detection viewport (~40 lines) keeps the whole agent banner in scrollback
+//     after exit, so content markers stay hot long after the agent is gone
+//   * agents WITHOUT a title convention fall back to content markers; use
+//     several distinct ones (exit banners quote single marker strings)
+// Extend per agent via settings.env: MARKERS_agy='Antigravity|foo' (regex, any hit).
 const PRESENCE_MARKERS = {
   pi: {
-    title: [/^π - /],
-    content: [/Antigravity-Mode/, /pi-agy-mode/, /GLM-\d[\w.-]*-Flash/],
-    minContent: 2,
+    title: [/^π - /],        // title-only: content viewport stays contaminated
+    content: [],             // after exit (banner remains in scrollback)
   },
 };
 
@@ -308,7 +308,7 @@ export function compileMarkers(cfg) {
 export function presenceMatch(kind, text, title, markers) {
   const m = markers[kind];
   if (!m) return false;
-  if ((m.title || []).some((re) => re.test(title || ''))) return true;
+  if ((m.title || []).length) return m.title.some((re) => re.test(title || ''));
   const hits = (m.content || []).filter((re) => re.test(text || '')).length;
   return hits >= (m.minContent ?? 1);
 }

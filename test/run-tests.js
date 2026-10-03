@@ -349,9 +349,9 @@ test('presence markers: title + multi-hit content; exit banner does not match', 
   const hit = (t, title, k = 'pi') => nodeLib(
     `console.log(lib.presenceMatch(process.env.K, process.env.T, process.env.TITLE, lib.compileMarkers({})))`,
     { T: t, TITLE: title, K: k }).stdout.trim();
-  assert.equal(hit(piRunning, 'π - hexagon-compiler'), 'true', 'running TUI: title match');
-  assert.equal(hit(piRunning, '@abc123: /bin/bash'), 'true', 'running TUI: 3 content hits');
-  assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner alone (1 hit) must NOT match');
+  assert.equal(hit(piRunning, 'π - hexagon-compiler'), 'true', 'running: pi title');
+  assert.equal(hit(piRunning, '@abc123: /bin/bash'), 'false', 'banner in viewport + cleared title = agent gone (title-only for pi)');
+  assert.equal(hit(piExitBanner, '@abc123: /bin/bash'), 'false', 'exit banner + cleared title');
   assert.equal(hit(bare, '@abc123: /bin/bash'), 'false', 'bare prompt');
   assert.equal(hit('hati@monster: ~/x', 'hati@monster: ~/x'), 'false', 'host prompt');
   assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', '', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true', 'user override');
