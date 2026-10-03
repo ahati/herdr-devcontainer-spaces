@@ -164,8 +164,10 @@ export function hrJson(args, opts) {
 export function socketPath() {
   if (process.env.HERDR_SOCKET_PATH) return process.env.HERDR_SOCKET_PATH;
   if (process.env.HERDR_SESSION && process.env.HERDR_SESSION !== 'default') {
-    const p = path.join(os.homedir(), '.config', 'herdr', 'sessions', process.env.HERDR_SESSION, 'herdr.sock');
-    try { if (fs.statSync(p).isSocket()) return p; } catch { /* absent */ }
+    // Named session: NEVER silently fall back to the primary (default) socket -
+    // a stale daemon must retry its own session, not attach to the user's live
+    // default session (observed with a leaked test subscriber).
+    return path.join(os.homedir(), '.config', 'herdr', 'sessions', process.env.HERDR_SESSION, 'herdr.sock');
   }
   return path.join(os.homedir(), '.config', 'herdr', 'herdr.sock');
 }

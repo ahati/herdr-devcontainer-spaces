@@ -340,6 +340,10 @@ test('startup: watcher spawn + held-lock skip', { timeout: 60000 }, async () => 
   assert.equal(procsOf('watcher.js', 'guardA').length, 0, 'no duplicate watcher while lock held');
   assert.ok(procsOf('events-subscribe.js', 'guardA').length >= 1, 'subscriber independent of watcher lock');
   holder.kill();
+  // the second startup's subscriber is a live daemon too - always reap both,
+  // or every suite run leaks one (it attaches to the primary socket!)
+  kill([...procsOf('watcher.js', 'guardA'), ...procsOf('events-subscribe.js', 'guardA')]);
+  await new Promise((r) => setTimeout(r, 300));
 });
 
 test('presence markers: title + multi-hit content; exit banner does not match', { timeout: T.test }, async () => {
