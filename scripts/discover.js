@@ -8,8 +8,8 @@ import {
   reportSpaceSubtext, panesOf,
 } from './lib.js';
 
-const RESURRECT = process.argv.includes('--resurrect');
 const cfg = loadConfig();
+const RESURRECT = process.argv.includes('--resurrect') || cfg.RESURRECT_ON_RESCAN === 1;
 const engine = detectEngine(cfg);
 if (!engine) {
   die(`no working container engine found (tried docker, podman). Install one, or pin ENGINE=docker|podman in settings.env`);
@@ -70,14 +70,19 @@ for (const row of dcList(engine.engine)) {
     continue;
   }
 
-  const kinds = commandExists('devcontainer') ? probeAgents(engine.engine, folder, cfg.AGENTS) : [];
-  log(`agents present in ${folder}:${kinds.length ? ' ' + kinds.join(' ') : ' none'}`);
+  const kinds = (cfg.AUTO_START_AGENTS === 1 && commandExists('devcontainer'))
+    ? probeAgents(engine.engine, folder, cfg.AGENTS, row.id)
+    : [];
   const kind = cfg.AUTO_START_AGENTS === 1 && kinds.length ? kinds[0] : '';
 
   const made = hrJson(['workspace', 'create', '--cwd', folder, '--label', path.basename(folder), '--no-focus']);
   const ws = made.json?.result?.workspace?.workspace_id;
   const rootTab = made.json?.result?.tab?.tab_id || null;
-  if (!made.ok || !ws) { warn(`workspace create failed for ${folder}`); continue; }
+  if (!made.ok || !ws) {
+    const errDetail = made.error || made.stderr || made.stdout || 'unknown error';
+    warn(`workspace create failed for ${folder}: ${errDetail}`);
+    continue;
+  }
   log(`created workspace ${ws} (${path.basename(folder)})`);
 
     const applied = rootTab
@@ -89,7 +94,11 @@ for (const row of dcList(engine.engine)) {
     warn('layout.apply unavailable; keeping default root pane — use the shell-here action');
   }
   reportSpaceSubtext(ws, cfg);
-  await state.upsert(folder, ws, row.id, kinds);
-  created++; 
+  const probedKinds = (kinds.length || !commandExists('devcontainer'))
+    ? kinds
+    : probeAgents(engine.engine, folder, cfg.AGENTS, row.id);
+  log(`agents present in ${folder}:${probedKinds.length ? ' ' + probedKinds.join(' ') : ' none'}`);
+  await state.upsert(folder, ws, row.id, probedKinds);
+  created++;
 }
 log(`rescan done (created: ${created})`);

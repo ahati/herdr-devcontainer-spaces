@@ -7,8 +7,18 @@ loadConfig();
 const ws = currentWorkspaceId();
 if (!ws) { log('no workspace context; open a devcontainer space first'); process.exit(1); }
 
-const folder = state.folderForWs(ws);
-if (!folder) { log(`workspace ${ws} is not a devcontainer space`); process.exit(1); }
+let folder = state.folderForWs(ws);
+if (!folder) {
+  try {
+    const ctx = JSON.parse(process.env.HERDR_PLUGIN_CONTEXT_JSON || '{}');
+    const cand = ctx.workspace_cwd || ctx.focused_pane_cwd || ctx.worktree?.path || ctx.cwd || '';
+    if (cand) {
+      const tracked = Object.keys(state.containers());
+      folder = tracked.find((f) => cand === f || cand.startsWith(f + path.sep)) || cand;
+    }
+  } catch { /* unparseable */ }
+  if (!folder) { log(`workspace ${ws} is not a devcontainer space`); process.exit(1); }
+}
 
 let kinds = state.agentsForWs(ws);
 if (!kinds.length) {

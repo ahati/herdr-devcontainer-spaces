@@ -8,7 +8,22 @@ note() { printf '%s\n' "$*" >> "$CALLS"; }
 
 case "$1" in
   exec)
-    # devcontainer exec --workspace-folder <F> sh -lc 'command -v <kind>'
+    # batch probe: for a in ...
+    for a in "$@"; do
+      case "$a" in
+        *"for a in "*)
+          if [ -f "$MOCK/agents-present" ]; then
+            for k in $(cat "$MOCK/agents-present"); do
+              case "$a" in
+                *" $k "*|*" $k;"*|*\"$k\"*) echo "$k" ;;
+              esac
+            done
+          fi
+          exit 0
+          ;;
+      esac
+    done
+    # fallback: individual probe
     kind=""
     for a in "$@"; do
       case "$a" in

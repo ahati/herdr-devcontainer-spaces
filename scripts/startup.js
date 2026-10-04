@@ -5,15 +5,22 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import { log, detectEngine, loadConfig, SESSION_DIR, SCRIPTS_DIR, commandExists } from './lib.js';
+import { log, detectEngine, loadConfig, tombstone, SESSION_DIR, SCRIPTS_DIR, commandExists } from './lib.js';
 
-loadConfig();
+const cfg = loadConfig();
 fs.mkdirSync(SESSION_DIR, { recursive: true });
+
+// 0) Session start: clean up session-scoped tombstones from prior runs.
+// Per AGENTS.md contract, tombstones are session-scoped (a closed space
+// returns at the next session start).
+if (cfg.TOMBSTONE_SESSION_ONLY !== 0) {
+  tombstone.clearSession();
+}
 
 // 1) Repair/rediscover spaces (synchronous, like the bash original — the
 // hook is a one-shot init command; idempotent, no-ops with no engine).
 if (detectEngine({ ENGINE: 'auto' })) {
-  const r = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, 'discover.js')], { stdio: 'ignore', timeout: 120000 });
+  const r = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, 'discover.js'), '--resurrect'], { stdio: 'inherit', timeout: 120000 });
   if (r.status !== 0) log(`startup: rescan exited ${r.status}`);
 } else {
   log('startup: no container engine; watcher idle until one is available');

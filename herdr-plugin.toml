@@ -2,7 +2,7 @@
 # in-container shells, and surface in-container coding agents as first-class agents.
 id = "devcontainer-spaces"
 name = "Devcontainer Spaces"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.0"   # verified against 0.9.3 (layout.apply, pane.report_agent, agent explain --file)
 description = "Detect devcontainers (docker/podman), create spaces with in-container shells, and make agents started inside those containers show up as Herdr agents"
 platforms = ["linux", "macos"]
@@ -15,7 +15,7 @@ command = ["node", "scripts/startup.js"]
 id = "rescan"
 title = "Re-scan devcontainers"
 contexts = ["workspace"]
-command = ["node", "scripts/discover.js"]
+command = ["node", "scripts/discover.js", "--resurrect"]
 
 # Action invoked with an argument to clear tombstones (bind to a key or run via
 # `herdr plugin action invoke devcontainer-spaces.resurrect`).
@@ -37,6 +37,12 @@ title = "Devcontainers: start agent in this space"
 contexts = ["workspace"]
 command = ["node", "scripts/start-agent.js"]
 
+[[actions]]
+id = "duplicate-space"
+title = "Devcontainers: duplicate space (single shell)"
+contexts = ["workspace"]
+command = ["node", "scripts/duplicate-space.js"]
+
 # Shortcuts — ctrl+alt family is the documented safe space for plugin bindings
 # (herdr's prefix is ctrl+b; most prefix chords are taken by built-ins).
 [[keys.command]]
@@ -50,6 +56,12 @@ key = "ctrl+alt+shift+r"
 type = "plugin_action"
 command = "devcontainer-spaces.resurrect"
 description = "Devcontainers: rescan (re-create closed spaces)"
+
+[[keys.command]]
+key = "ctrl+alt+d"
+type = "plugin_action"
+command = "devcontainer-spaces.duplicate-space"
+description = "Devcontainers: duplicate space (single shell)"
 
 [[keys.command]]
 key = "ctrl+alt+h"

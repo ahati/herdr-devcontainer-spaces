@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   log, loadConfig, state, tombstone, hr, hrJson, SESSION_DIR, compileMarkers, presenceMatch,
-  detectEngine,
+  detectEngine, isShellPrompt, presenceHits, lastPresenceLine,
 } from './lib.js';
 
 const SCRIPT_DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -17,18 +17,31 @@ const cfg = loadConfig();
 const MARKERS = compileMarkers(cfg);
 
 const LOCK = path.join(SESSION_DIR, 'watcher.lock.d');
-try { fs.mkdirSync(LOCK); } catch { process.exit(0); }   // already running
 const PIDFILE = path.join(LOCK, 'pid');
-fs.writeFileSync(PIDFILE, String(process.pid));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+try {
+  fs.mkdirSync(LOCK);
+  fs.writeFileSync(PIDFILE, String(process.pid));
+} catch {
+  try {
+    const other = Number(fs.readFileSync(PIDFILE, 'utf8').trim());
+    if (other && other !== process.pid && alive(other)) {
+      const cmd = fs.readFileSync(`/proc/${other}/cmdline`, 'utf8');
+      if (cmd.includes('watcher.js')) process.exit(0);
+    }
+  } catch { /* stale lock — take over */ }
+  fs.writeFileSync(PIDFILE, String(process.pid));
+}
+
 function soleOwner() {                                   // self-heal duplicates
   try {
-    const other = Number(fs.readFileSync(PIDFILE, 'utf8'));
-    if (other !== process.pid && alive(other)) {
+    const other = Number(fs.readFileSync(PIDFILE, 'utf8').trim());
+    if (other && other !== process.pid && alive(other)) {
       const cmd = fs.readFileSync(`/proc/${other}/cmdline`, 'utf8');
       if (cmd.includes('watcher.js')) return false;       // a peer lives — yield
     }
-  } catch { /* no pidfile */ }
+  } catch { /* no pidfile or dead */ }
   fs.writeFileSync(PIDFILE, String(process.pid));
   return true;
 }
@@ -85,18 +98,58 @@ const eventsChild = (() => {
 })();
 process.on('exit', () => { try { eventsChild?.kill(); } catch { /* gone */ } });
 
+const PI_WORKING_PATTERNS = [
+  /──\s+[·✢*✶✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+/i,
+  /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Working/i,
+  /Working\s*\((?:escape|esc)\s+to\s+interrupt\)/i,
+  /Thinking(?:\.\.\.|:)/i,
+  /Compacting context/i,
+  /Summarizing branch/i,
+  /Retrying \(\d+\/\d+\)/i,
+];
+
+function isPiWorking(text) {
+  const lines = String(text || '').split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
+  const bottom = lines.slice(-8);
+  if (bottom.some((l) => /Turn took/i.test(l))) return false;
+  return bottom.some((l) => PI_WORKING_PATTERNS.some((re) => re.test(l)));
+}
+
 // classify — herdr's manifests decide the state when they actually match; a
 // fallback-derived idle is NOT evidence (explain falls back on any screen for a
 // known agent kind). Presence markers close the gap for agents whose idle UI
-// matches no manifest rule (pi on herdr 0.9.3): marker hit => agent present,
+// matches no manifest rule (pi and opencode on herdr 0.9.3): marker hit => agent present,
 // state falls back to idle.
-function classify(snapFile, snapText, title, kind) {
+function classify(snapFile, snapText, title, kind, prevAgent = null) {
+  // Fast path for Pi working state:
+  // Pi v1.0 with extensions renders custom spinner borders ("── · Nucleating… ──")
+  // or interrupt hints that Herdr's built-in pi.toml manifest misses.
+  if (kind === 'pi' && isPiWorking(snapText)) {
+    if (!isShellPrompt(snapText)) return 'working';
+  }
+
   const r = hrJson(['agent', 'explain', '--file', snapFile, '--agent', kind, '--json']);
   if (r.ok && r.json) {
     const st = r.json.state || '';
-    if (st && st !== 'unknown' && !(r.json.idle_fallback_reason || r.json.fallback_reason)) return st;
+    if (st && st !== 'unknown' && !(r.json.idle_fallback_reason || r.json.fallback_reason)) {
+      if (kind === 'pi' && isPiWorking(snapText)) return 'working';
+      return st;
+    }
+    // Turn completion / idle detection:
+    // If Herdr returned idle (via fallback or manifest), accept it if:
+    // 1) This agent was already running/working in this pane (turn completed!), OR
+    // 2) Our presence markers match the screen
+    if (st === 'idle' && (prevAgent === kind || presenceMatch(kind, snapText, title, MARKERS))) {
+      if (!isShellPrompt(snapText)) {
+        if (kind === 'pi' && isPiWorking(snapText)) return 'working';
+        return 'idle';
+      }
+    }
   }
-  if (presenceMatch(kind, snapText, title, MARKERS)) return 'idle';
+  if (presenceMatch(kind, snapText, title, MARKERS)) {
+    if (kind === 'pi' && isPiWorking(snapText)) return 'working';
+    return 'idle';
+  }
   return '';
 }
 
@@ -104,7 +157,13 @@ function serverAlive() { return hr(['workspace', 'list'], { timeoutMs: 10000 }).
 
 async function tick() {
   if (!soleOwner()) { log('duplicate watcher detected; exiting'); process.exit(0); }
-  const rows = Object.entries(state.containers()).map(([folder, v]) => ({ ws: v.workspace_id, folder, kinds: v.agents || [] }));
+  const rows = [];
+  for (const [folder, v] of Object.entries(state.containers())) {
+    const wsList = [v.workspace_id, ...(v.secondary_workspaces || [])].filter(Boolean);
+    for (const ws of wsList) {
+      rows.push({ ws, folder, kinds: v.agents || [] });
+    }
+  }
   if (!rows.length) return;
 
   const listing = hrJson(['pane', 'list']);
@@ -140,19 +199,65 @@ async function tick() {
         }
         continue;
       }
-      fs.writeFileSync(snap, rd.stdout);
-      const title = `${p.terminal_title_stripped || ''} ${p.terminal_title || ''} ${p.label || ''}`;
-
-      let best = '', bestState = '';
-      for (const k of kinds) {
-        const st = classify(snap, rd.stdout, title, k);
-        if (st) { best = k; bestState = st; break; }
-      }
-      fs.rmSync(snap, { force: true });
 
       const panes = state.panes();
       const prev = panes[pane]?.agent || '';
       const prevState = panes[pane]?.state || '';
+
+      // Latency optimization: skip idle bash prompts without running explain
+      if (!prev && isShellPrompt(rd.stdout)) {
+        continue;
+      }
+
+      // If an agent was running and shell prompt returned, release immediately
+      if (prev && isShellPrompt(rd.stdout)) {
+        const seq = (panes[pane]?.seq || 0) + 1;
+        hr(['pane', 'release-agent', pane, '--source', 'custom:devcontainer', '--agent', prev, '--seq', String(seq)]);
+        await state.setPanesSafe((pp) => { pp[pane] = { agent: null, state: null, seq }; return pp; });
+        log(`pane ${pane}: shell prompt returned; released ${prev}`);
+        continue;
+      }
+
+      fs.writeFileSync(snap, rd.stdout);
+      const title = `${p.terminal_title_stripped || ''} ${p.terminal_title || ''} ${p.label || ''}`;
+
+      let best = '', bestState = '';
+      let bestLine = -1;
+      let bestHits = 0;
+
+      for (const k of kinds) {
+        const st = classify(snap, rd.stdout, title, k, prev);
+        if (st) {
+          const hits = presenceHits(k, rd.stdout, MARKERS);
+          const line = lastPresenceLine(k, rd.stdout, MARKERS);
+          // Prioritize the agent whose marker appears lowest on the screen (active agent).
+          // If equal line position or title match, prefer more hits.
+          // Maintain prev agent if it is still confirmed active.
+          const isPrev = (k === prev);
+          let replace = false;
+          if (!best) {
+            replace = true;
+          } else if (line > bestLine) {
+            replace = true;
+          } else if (line === bestLine) {
+            if (hits > bestHits) {
+              replace = true;
+            } else if (hits === bestHits && isPrev) {
+              replace = true;
+            }
+          } else if (isPrev && bestLine === -1) {
+            replace = true;
+          }
+
+          if (replace) {
+            best = k;
+            bestState = st;
+            bestLine = line;
+            bestHits = hits;
+          }
+        }
+      }
+      fs.rmSync(snap, { force: true });
       if (best) {
         if (best !== prev || bestState !== prevState) {
           if (prev && prev !== best) {

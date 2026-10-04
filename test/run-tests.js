@@ -368,6 +368,10 @@ test('presence markers: title + multi-hit content; exit banner does not match', 
   assert.equal(hit('OpenAI Codex\nesc to interrupt\n$ ', '@c: /bin/bash', 'codex'), 'false', 'codex exited: prompt at bottom');
   assert.equal(hit('opencode\nCtrl+C to exit', '@c: /bin/bash', 'opencode'), 'true', 'opencode idle UI');
   assert.equal(hit('opencode\nCtrl+C to exit\nroot@x:~# ', '@c: /bin/bash', 'opencode'), 'false', 'opencode exited: prompt at bottom');
+  assert.equal(hit('Model scope: glm-5.3\nescape interrupt · ctrl+c/ctrl+d clear/exit\n0.0%/1.0M (auto)', '@c: /bin/bash', 'pi'), 'true', 'real pi idle in devcontainer');
+  assert.equal(hit('Model scope: glm-5.3\nescape interrupt\nroot@x:~$ ', '@c: /bin/bash', 'pi'), 'false', 'pi exited: prompt at bottom');
+  assert.equal(hit('Ask anything… "What is the tech stack?"\ntab agents\nctrl+p commands', '@c: /bin/bash', 'opencode'), 'true', 'real opencode idle in devcontainer');
+  assert.equal(hit('Ask anything…\ntab agents\nroot@x:~$ ', '@c: /bin/bash', 'opencode'), 'false', 'opencode exited: prompt at bottom');
   assert.equal(nodeLib(`console.log(lib.presenceMatch('agy', 'MY-AGY-BANNER', '', lib.compileMarkers({MARKERS_agy: 'MY-AGY-BANNER'})))`).stdout.trim(), 'true', 'user override');
 });
 
@@ -450,6 +454,10 @@ test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () =
   assert.ok(wl().includes(`pane ${ws}:p1: agent=claude`));
   assert.ok(!wl().includes(`pane ${ws}:p2:`), 'dedicated agent pane skipped');
   assert.ok(calls().includes('pane.report-agent'));
+  // turn completion: agent finishes working and transitions to idle while screen remains
+  rules({ claude: { marker: 'claude ui on screen', state: 'fallback-idle' } });
+  await wait(1300);
+  assert.ok(/agent=claude state=idle/.test(wl()), 'turn completion detected (working -> idle)');
   screen('p1', 'just a shell prompt\n');
   rules({ claude: { marker: 'claude ui on screen', state: 'fallback-idle' } });
   await wait(1300);
@@ -460,9 +468,123 @@ test('watcher: report/release of in-shell agent', { timeout: 60000 }, async () =
   rules({ claude: { marker: 'claude ui on screen', state: 'working' } });
   screen('p1', 'claude ui on screen\n');
   await wait(1300);
-  assert.ok(/report-agent[^\n]*--seq 3(?:\s|$)/.test(calls()), 're-launch reports with seq 3');
+  assert.ok(/report-agent[^\n]*--seq 4(?:\s|$)/.test(calls()), 're-launch reports with incremented seq');
   assert.ok((wl().match(/agent=claude state=working/g) || []).length >= 2, 're-detected after re-launch');
   w.kill('SIGTERM');
   await new Promise((r) => w.on('exit', r));
 });
+
+test('duplicate-space: creates new space with single devcontainer shell', { timeout: T.test }, () => {
+  scenario('duplicate-space');
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  run('discover.js');
+  const ws1 = Object.values(stateJson())[0].workspace_id;
+  const r = run('duplicate-space.js', [], { HERDR_PLUGIN_CONTEXT_JSON: JSON.stringify({ workspace_id: ws1 }) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stderr.includes('applied single devcontainer shell layout'), r.stderr);
+  assert.ok(r.stderr.includes('project-a-2'), r.stderr);
+  const c = stateJson();
+  const folder = Object.keys(c)[0];
+  assert.ok(Array.isArray(c[folder].secondary_workspaces), 'secondary_workspaces present');
+  assert.equal(c[folder].secondary_workspaces.length, 1);
+  const ws2 = c[folder].secondary_workspaces[0];
+  const f = nodeLib(`console.log(lib.state.folderForWs(process.env.WS))`, { WS: ws2 }).stdout.trim();
+  assert.equal(f, folder, 'folderForWs resolves secondary workspace');
+});
+
+test('discover: RESURRECT_ON_RESCAN config setting resurrects closed space', { timeout: T.test }, () => {
+  scenario('resurrect-config');
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  run('discover.js');
+  const ws = Object.values(stateJson())[0].workspace_id;
+  run('on-workspace-closed.js', [], { HERDR_PLUGIN_EVENT_JSON: JSON.stringify({ data: { workspace_id: ws } }) });
+  const rSkip = run('discover.js');
+  assert.ok(rSkip.stderr.includes('tombstoned; use resurrect'));
+  const rRes = run('discover.js', [], { RESURRECT_ON_RESCAN: '1' });
+  assert.ok(rRes.stderr.includes('resurrecting'), rRes.stderr);
+});
+
+test('watcher: pi custom spinner working -> turn completion -> release', { timeout: 60000 }, async () => {
+  scenario('watcher-pi');
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  fs.writeFileSync(path.join(SC.d, 'agents-present'), 'pi\n');
+  run('discover.js');
+  const ws = Object.values(stateJson())[0].workspace_id;
+  const seed = (panes) => fs.writeFileSync(SC.env.MOCK_PANES, JSON.stringify({ result: { panes } }));
+  seed([
+    { pane_id: `${ws}:p1`, workspace_id: ws, tab_id: `${ws}:t2`, label: 'shell' },
+  ]);
+  const screen = (p, t) => fs.writeFileSync(path.join(SC.d, 'screens', `${ws}:${p}.txt`), t);
+  const logF = path.join(SC.d, 'watcher.log');
+  const w = track(spawn(process.execPath, [path.join(SCRIPTS, 'watcher.js')], {
+    env: { ...SC.env, POLL_SECS: '0.3' }, stdio: ['ignore', fs.openSync(logF, 'a'), fs.openSync(logF, 'a')],
+  }));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const wl = () => fs.readFileSync(logF, 'utf8');
+
+  // 1. Pi is working with custom spinner
+  screen('p1', '── · Nucleating… ───────────────────────────────────────────────\n2.3%/1.0M (auto)\n');
+  await wait(1200);
+  assert.ok(/agent=pi state=working/.test(wl()), 'pi working detected with custom spinner');
+
+  // 2. Pi turn completes: spinner gone, answer and prompt rendered
+  screen('p1', 'Model scope: glm-5.3\nescape interrupt · ctrl+c/ctrl+d clear/exit\n✻ Turn took 5s\n● Hi there!\n');
+  await wait(1200);
+  assert.ok(/agent=pi state=idle/.test(wl()), 'pi turn completion detected (working -> idle)');
+
+  // 3. User exits Pi back to bash prompt
+  screen('p1', 'root@e4bd23f2b44b:/workspaces$ ');
+  await wait(1200);
+  assert.ok(wl().includes('released pi'), 'pi released when shell prompt returns');
+
+  w.kill('SIGTERM');
+  await new Promise((r) => w.on('exit', r));
+});
+
+test('watcher: opencode idle detection -> working -> turn completion -> release', { timeout: 60000 }, async () => {
+  scenario('watcher-opencode');
+  engines({ mode: 'docker-rootful', containers: [C1(SC.d)] });
+  fs.writeFileSync(path.join(SC.d, 'agents-present'), 'opencode\n');
+  run('discover.js');
+  const ws = Object.values(stateJson())[0].workspace_id;
+  const seed = (panes) => fs.writeFileSync(SC.env.MOCK_PANES, JSON.stringify({ result: { panes } }));
+  seed([
+    { pane_id: `${ws}:p1`, workspace_id: ws, tab_id: `${ws}:t2`, label: 'shell' },
+  ]);
+  const rules = (o) => fs.writeFileSync(path.join(SC.d, 'rules.json'), JSON.stringify(o));
+  const screen = (p, t) => fs.writeFileSync(path.join(SC.d, 'screens', `${ws}:${p}.txt`), t);
+  const logF = path.join(SC.d, 'watcher.log');
+  const w = track(spawn(process.execPath, [path.join(SCRIPTS, 'watcher.js')], {
+    env: { ...SC.env, POLL_SECS: '0.3' }, stdio: ['ignore', fs.openSync(logF, 'a'), fs.openSync(logF, 'a')],
+  }));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const wl = () => fs.readFileSync(logF, 'utf8');
+
+  // 1. OpenCode launches idle (no interrupt hint)
+  screen('p1', 'Ask anything… "What is the tech stack?"\ntab agents\nctrl+p commands\n');
+  rules({ opencode: { marker: 'Ask anything', state: 'fallback-idle' } });
+  await wait(1200);
+  assert.ok(/agent=opencode state=idle/.test(wl()), 'opencode idle detected on launch');
+
+  // 2. OpenCode working on a query
+  screen('p1', 'opencode working\nesc to interrupt\n');
+  rules({ opencode: { marker: 'esc to interrupt', state: 'working' } });
+  await wait(1200);
+  assert.ok(/agent=opencode state=working/.test(wl()), 'opencode working detected');
+
+  // 3. OpenCode turn completes
+  screen('p1', 'Ask anything… "What is the tech stack?"\ntab agents\nctrl+p commands\n');
+  rules({ opencode: { marker: 'Ask anything', state: 'fallback-idle' } });
+  await wait(1200);
+  assert.ok((wl().match(/agent=opencode state=idle/g) || []).length >= 2, 'opencode turn completion detected (working -> idle)');
+
+  // 4. OpenCode exits back to shell prompt
+  screen('p1', 'root@e4bd23f2b44b:/workspaces$ ');
+  await wait(1200);
+  assert.ok(wl().includes('released opencode'), 'opencode released when shell prompt returns');
+
+  w.kill('SIGTERM');
+  await new Promise((r) => w.on('exit', r));
+});
+
 

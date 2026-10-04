@@ -21,13 +21,21 @@ export function warn(msg) { log(`WARN: ${msg}`); }
 export function die(msg) { log(`ERROR: ${msg}`); process.exit(1); }
 
 // ---------------------------------------------------------------- config ---
-export const SESSION = process.env.HERDR_SESSION || 'default';
+export function detectSession() {
+  if (process.env.HERDR_SESSION) return process.env.HERDR_SESSION;
+  if (process.env.HERDR_SOCKET_PATH) {
+    const m = process.env.HERDR_SOCKET_PATH.match(/sessions\/([^/]+)\/herdr\.sock/);
+    if (m) return m[1];
+  }
+  return 'default';
+}
+export const SESSION = detectSession();
 export const STATE_ROOT =
   process.env.HERDR_PLUGIN_STATE_DIR ||
   path.join(os.homedir(), '.local', 'state', 'herdr', 'plugins', PLUGIN_ID);
 export const CONFIG_DIR =
   process.env.HERDR_PLUGIN_CONFIG_DIR ||
-  path.join(os.homedir(), '.config', 'herdr', 'plugins', PLUGIN_ID);
+  path.join(os.homedir(), '.config', 'herdr', 'plugins', 'config', PLUGIN_ID);
 export const SESSION_DIR = path.join(STATE_ROOT, 'sessions', SESSION);
 const STATE_FILE = path.join(SESSION_DIR, 'containers.json');
 const PANES_FILE = path.join(SESSION_DIR, 'panes.json');
@@ -39,7 +47,8 @@ const DEFAULTS = {
   AUTO_START_AGENTS: 0,          // dedicated agent pane is opt-in
   AGENTS: 'claude codex gemini cursor opencode copilot agy pi',
   TAB_LABEL: 'devcontainer',
-  POLL_SECS: Number(process.env.POLL_SECS || 3),
+  POLL_SECS: Number(process.env.POLL_SECS || 1),
+  RESURRECT_ON_RESCAN: 0,
 };
 
 export function parseSettings(text) {
@@ -53,15 +62,19 @@ export function parseSettings(text) {
 
 export function loadConfig() {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
-  const cfg = { ...DEFAULTS, ...parseSettings(process.env.POLL_SECS !== undefined ? `POLL_SECS=${process.env.POLL_SECS}` : '') };
+  const cfg = { ...DEFAULTS };
   const file = path.join(CONFIG_DIR, 'settings.env');
   try { Object.assign(cfg, parseSettings(fs.readFileSync(file, 'utf8'))); } catch { /* absent */ }
+  // Allow environment overrides
+  for (const k of Object.keys(DEFAULTS).concat(['TOMBSTONE_SESSION_ONLY', 'RESURRECT_ON_RESCAN'])) {
+    if (process.env[k] !== undefined) cfg[k] = process.env[k];
+  }
   // settings.env values are strings — coerce the numeric knobs
-  if (cfg.TOMBSTONE_SESSION_ONLY === 0) setTombstoneScope(false);
-  for (const k of ['AUTO_CREATE_SPACES', 'AUTO_START_CONTAINERS', 'AUTO_START_AGENTS', 'POLL_SECS']) {
+  for (const k of ['AUTO_CREATE_SPACES', 'AUTO_START_CONTAINERS', 'AUTO_START_AGENTS', 'POLL_SECS', 'TOMBSTONE_SESSION_ONLY', 'RESURRECT_ON_RESCAN']) {
     if (cfg[k] !== undefined && cfg[k] !== '') cfg[k] = Number(cfg[k]) || 0;
   }
-  cfg.AGENTS = cfg.AGENTS.split(/\s+/).filter(Boolean);
+  if (cfg.TOMBSTONE_SESSION_ONLY === 0) setTombstoneScope(false);
+  cfg.AGENTS = typeof cfg.AGENTS === 'string' ? cfg.AGENTS.split(/\s+/).filter(Boolean) : cfg.AGENTS;
   cfg.POLL_SECS = Number(cfg.POLL_SECS) || 3;
   return cfg;
 }
@@ -102,15 +115,34 @@ export const state = {
   panes: () => readJson(PANES_FILE, {}),
   setContainers: (obj) => atomicWriteJson(STATE_FILE, obj),
   setPanes: (obj) => atomicWriteJson(PANES_FILE, obj),
-  folderForWs(ws) { return Object.keys(this.containers()).find((f) => this.containers()[f].workspace_id === ws) || ''; },
+  folderForWs(ws) {
+    const c = this.containers();
+    for (const [f, v] of Object.entries(c)) {
+      if (v.workspace_id === ws) return f;
+      if (Array.isArray(v.secondary_workspaces) && v.secondary_workspaces.includes(ws)) return f;
+    }
+    return '';
+  },
   agentsForWs(ws) {
-    const e = Object.entries(this.containers()).find(([, v]) => v.workspace_id === ws);
+    const e = Object.entries(this.containers()).find(([, v]) => v.workspace_id === ws || (Array.isArray(v.secondary_workspaces) && v.secondary_workspaces.includes(ws)));
     return e ? e[1].agents : [];
   },
   async upsert(folder, ws, cid, agents) {
     await withDirLock(path.join(SESSION_DIR, '.lock.d'), () => {
       const c = this.containers();
-      c[folder] = { workspace_id: ws, container_id: cid, agents };
+      const existingSecondary = c[folder]?.secondary_workspaces || [];
+      c[folder] = { workspace_id: ws, container_id: cid, agents, secondary_workspaces: existingSecondary };
+      this.setContainers(c);
+    });
+  },
+  async addSecondaryWs(folder, ws) {
+    await withDirLock(path.join(SESSION_DIR, '.lock.d'), () => {
+      const c = this.containers();
+      if (!c[folder]) c[folder] = { workspace_id: ws, container_id: '', agents: [] };
+      c[folder].secondary_workspaces = c[folder].secondary_workspaces || [];
+      if (!c[folder].secondary_workspaces.includes(ws)) {
+        c[folder].secondary_workspaces.push(ws);
+      }
       this.setContainers(c);
     });
   },
@@ -120,7 +152,18 @@ export const state = {
     await withDirLock(path.join(SESSION_DIR, '.lock.d'), () => {
       const c = this.containers();
       for (const [f, v] of Object.entries(c)) {
-        if (v.workspace_id === ws) { delete c[f]; removed.push(f); }
+        if (v.workspace_id === ws) {
+          if (v.secondary_workspaces && v.secondary_workspaces.length > 0) {
+            // Promote the next secondary workspace to primary; do not tombstone folder
+            v.workspace_id = v.secondary_workspaces.shift();
+          } else {
+            delete c[f];
+            removed.push(f);
+          }
+        } else if (Array.isArray(v.secondary_workspaces) && v.secondary_workspaces.includes(ws)) {
+          v.secondary_workspaces = v.secondary_workspaces.filter((id) => id !== ws);
+          // Closing a secondary duplicate does not drop the folder or tombstone it
+        }
       }
       this.setContainers(c);
     });
@@ -147,15 +190,34 @@ export function tombstonePath(folder) {
 }
 export const tombstone = {
   has: (folder) => fs.existsSync(tombstonePath(folder)),
-  set: (folder) => { fs.mkdirSync(STATE_ROOT, { recursive: true }); fs.writeFileSync(tombstonePath(folder), folder + '\n'); },
+  set: (folder) => {
+    const p = tombstonePath(folder);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, folder + '\n');
+  },
   clear: (folder) => { try { fs.unlinkSync(tombstonePath(folder)); } catch { /* absent */ } },
+  clearSession: () => {
+    try {
+      if (fs.existsSync(SESSION_DIR)) {
+        for (const f of fs.readdirSync(SESSION_DIR)) {
+          if (f.endsWith('.closed')) {
+            try { fs.unlinkSync(path.join(SESSION_DIR, f)); } catch { /* absent */ }
+          }
+        }
+      }
+    } catch { /* absent */ }
+  },
 };
 
 // ------------------------------------------------------------- herdr CLI ---
 export const HERDR_BIN = process.env.HERDR_BIN_PATH || process.env.HERDR_BIN || 'herdr';
 
 export function hr(args, { timeoutMs = 20000 } = {}) {
-  const r = spawnSync(HERDR_BIN, args, { encoding: 'utf8', timeout: timeoutMs });
+  const r = spawnSync(HERDR_BIN, args, {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    env: { ...process.env, HERDR_SOCKET_PATH: socketPath() },
+  });
   return { ok: r.status === 0, status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 export function hrJson(args, opts) {
@@ -275,18 +337,53 @@ export function dc(engine, args, opts = {}) {
   });
 }
 
-export function probeAgents(engine, folder, kinds) {
+export function probeAgents(engine, folder, kinds, containerId = null) {
   // Probe via both a login shell (~/.profile) and an interactive bash
-  // (~/.bashrc — where nvm / ~/.local/bin paths usually live); a single
-  // `sh -lc` misses agents installed via bashrc-only PATH setup (observed:
-  // claude/codex/opencode unreported while agy/pi were found).
+  // (~/.bashrc — where nvm / ~/.local/bin paths usually live).
+  // Batch probes reduce discovery time from 16-20 seconds to sub-second.
+  const list = (Array.isArray(kinds) ? kinds : String(kinds || '').split(/\s+/)).map((k) => k.trim()).filter(Boolean);
+  if (!list.length) return [];
+  const cleanList = list.map((k) => k.replace(/[^a-z0-9_-]/g, '')).filter(Boolean);
+  if (!cleanList.length) return [];
+
+  const shCmd = `for a in ${cleanList.join(' ')}; do if command -v "$a" >/dev/null 2>&1 || which "$a" >/dev/null 2>&1; then echo "$a"; fi; done`;
+
+  // 1. Direct engine exec when containerId is available (sub-second)
+  if (containerId) {
+    try {
+      const r = spawnSync(engine, ['exec', '-i', containerId, 'bash', '-ic', shCmd], {
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+      if (r.status === 0 && r.stdout) {
+        const found = r.stdout.split('\n').map((s) => s.trim()).filter((s) => list.includes(s));
+        if (found.length) return found;
+      }
+    } catch { /* fallback to devcontainer exec */ }
+  }
+
+  // 2. Batch devcontainer exec (~1.5s instead of sequential spawns)
+  for (const sh of [['bash', '-ic'], ['sh', '-lc']]) {
+    try {
+      const r = dc(engine, ['exec', '--workspace-folder', folder, ...sh, shCmd], {
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+      if (r.status === 0 && r.stdout) {
+        const found = r.stdout.split('\n').map((s) => s.trim()).filter((s) => list.includes(s));
+        if (found.length) return found;
+      }
+    } catch { /* try next */ }
+  }
+
+  // 3. Fallback: individual probe if batch returned nothing (e.g. test fixtures)
   const shells = [['sh', '-lc'], ['bash', '-ic']];
   const present = [];
-  for (const kind of kinds) {
+  for (const kind of list) {
     const clean = kind.replace(/[^a-z0-9_-]/g, '');
     let found = false;
     for (const sh of shells) {
-      const r = dc(engine, ['exec', '--workspace-folder', folder, ...sh, `command -v ${clean}`], { stdio: 'ignore' });
+      const r = dc(engine, ['exec', '--workspace-folder', folder, ...sh, `command -v ${clean}`], { stdio: 'ignore', timeout: 5000 });
       if (r.status === 0) { found = true; break; }
     }
     if (found) present.push(kind);
@@ -296,26 +393,63 @@ export function probeAgents(engine, folder, kinds) {
 
 // ------------------------------------------------- agent presence markers ---
 // herdr's screen manifests decide the agent STATE, but some agents' idle screens
-// match no manifest rule (observed: pi 2026.10 on herdr 0.9.3). These markers are
-// the plugin's own presence signal. Hard-won specifics:
-//   * the pane TITLE is the only reliable live/dead signal for agents that set
-//     one — pi sets 'π - …' while running and the shell resets it on exit. The
-//     detection viewport (~40 lines) keeps the whole agent banner in scrollback
-//     after exit, so content markers stay hot long after the agent is gone
-//   * agents WITHOUT a title convention fall back to content markers; use
-//     several distinct ones (exit banners quote single marker strings)
-// Extend per agent via settings.env: MARKERS_agy='Antigravity|foo' (regex, any hit).
+// match no manifest rule (pi and opencode on herdr 0.9.3 have no idle rules).
+// These markers are the plugin's own presence signal.
 const PRESENCE_MARKERS = {
   pi: {
-    title: [/^π - /],        // title-only: content viewport stays contaminated
-    content: [],             // after exit (banner remains in scrollback)
+    title: [/^\s*π\s*-\s*/, /^\s*π\b/i],
+    content: [
+      /▀▀█\s+v\d/,
+      /Model scope:\s+[a-z0-9]/i,
+      /Pi can explain its own features/i,
+      /Press ctrl\+o to show full startup help/i,
+      /──\s+[·✢*✶✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S+/,
+      /✻ Turn took \d+/i,
+      /\[Skills\].*\[Extensions\]/s,
+    ],
+    minContent: 1,
   },
-  // Best-effort defaults from the agents' documented idle UIs; override or add
-  // via settings.env MARKERS_<kind>=<regex> (any-hit semantics). Multi-hit
-  // content thresholds avoid matching a single quoted string in scrollback.
-  claude: { title: [], content: [/Welcome to Claude Code/, /Claude Code/, /esc to (?:interrupt|clear)/, /╭[─━]{4,}/], minContent: 2 },
-  codex:   { title: [], content: [/OpenAI Codex/, /codex v?\d/i, /esc to interrupt/, /⠋|⠙|⠹|⠸/], minContent: 2 },
-  opencode: { title: [], content: [/opencode/i, /new (?:session|thread)/i, /Ctrl\+C/i, /▌/], minContent: 2 },
+  claude: {
+    title: [/^\s*Claude\b/i, /^\s*[\u2733*]\s*Claude/i],
+    content: [
+      /\bWelcome to Claude Code\b/i,
+      /\bClaude\s*Code\b/i,
+      /╭[─━]{4,}/,
+      /Claude(?:\x1b\[[0-9;]*m|\s)+v?\d+\.\d+/i,
+      /esc to (?:interrupt|clear|cancel)/i,
+    ],
+    minContent: 1,
+  },
+  codex: {
+    title: [/^\s*OpenAI Codex\b/i, /^\s*codex\b/i],
+    content: [/\bOpenAI Codex\b/i, /codex v?\d/i, /esc to interrupt/i, /⠋|⠙|⠹|⠸/],
+    minContent: 2,
+  },
+  opencode: {
+    title: [/^\s*OpenCode\b/i],
+    content: [
+      /█▀▀█\s*█▀▀█/,
+      /Ask anything/i,
+      /Ask a question/i,
+      /tab agents/i,
+      /ctrl\+p commands/i,
+      /Tip Run opencode upgrade/i,
+      /△ Permission required/i,
+      /(?:^|\n)\s*opencode\b.*(?:Ctrl\+C|exit)/is,
+    ],
+    minContent: 1,
+  },
+  agy: {
+    title: [/^\s*Antigravity\b/i],
+    content: [
+      /\bAntigravity\s+CLI\b/i,
+      /▄▀▀▄.*Antigravity/s,
+      /\bGoogle AI (?:Pro|Studio)\b/i,
+      /requesting permission for:/i,
+    ],
+    minContent: 1,
+  },
+  gemini: { title: [/gemini/i], content: [/gemini/i, /Google Gemini/i], minContent: 1 },
 };
 
 export function compileMarkers(cfg) {
@@ -330,18 +464,52 @@ export function compileMarkers(cfg) {
   return out;
 }
 
+export function isShellPrompt(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return false;
+  const last = lines[lines.length - 1];
+  // Common shell prompt shapes at exit:
+  // - "root ➜ /workspaces/x $ "
+  // - "user@host:dir$ " or "user@host:dir# "
+  // - "bash-5.2$ " or "sh-5.2# "
+  // - bare "$ " or "# " (but not agent prompt characters like ❯ or ›)
+  if (/(?:@\S+[:/]|➜\s+\S+|\bbash-[0-9.]+|\bsh-[0-9.]+)[$#]\s*$/.test(last)) return true;
+  if (/^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:.*[$#]\s*$/.test(last)) return true;
+  if (/^[^❯›?]*[$#]\s*$/.test(last)) return true;
+  return false;
+}
+
+export function presenceHits(kind, text, markers) {
+  const m = markers[kind];
+  if (!m || !m.content) return 0;
+  return m.content.filter((re) => re.test(text || '')).length;
+}
+
+export function lastPresenceLine(kind, text, markers) {
+  const m = markers[kind];
+  if (!m || !m.content) return -1;
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (m.content.some((re) => re.test(lines[i]))) return i;
+  }
+  return -1;
+}
+
 export function presenceMatch(kind, text, title, markers) {
   const m = markers[kind];
   if (!m) return false;
-  if ((m.title || []).length) return m.title.some((re) => re.test(title || ''));
   // Shell-prompt guard: after an agent exits, its banner stays in the ~40-line
   // detection viewport, so content markers remain hot. But an exited pane ends
   // its viewport with a bare shell prompt — a running TUI never does. Prompt at
   // the bottom => the shell owns the screen => content markers are ignored.
-  const lines = String(text || '').split('\n').filter((l) => l.trim());
-  const last = lines[lines.length - 1] || '';
-  if (/[$#❯➜]\s*$/.test(last)) return false;
-  const hits = (m.content || []).filter((re) => re.test(text || '')).length;
+  if (isShellPrompt(text)) return false;
+
+  // Authentic agent title pattern (ignoring bash @host: titles)
+  if ((m.title || []).length && m.title.some((re) => re.test(title || ''))) {
+    if (!String(title || '').startsWith('@')) return true;
+  }
+
+  const hits = presenceHits(kind, text, markers);
   return hits >= (m.minContent ?? 1);
 }
 
